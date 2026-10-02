@@ -1,0 +1,1 @@
+# CLI tool to communicate with LoRa nodes over USB serial
