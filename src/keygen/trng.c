@@ -65,21 +65,3 @@ int get_entropy_input(uint8_t entropy_input[32])
 
     return 1;
 }
-
-// calls get_rdseed 2 times and stores in 16 byte buffer (later for ctr nonce)
-
-int get_nonce(uint8_t nonce[16])
-{
-    unsigned long long value;
-
-    for (int i = 0; i < 2; i++) {
-        if (!get_rdseed(&value))
-            return 0;
-        // same loop as above
-        for (int j = 0; j < 8; j++) {
-            nonce[i * 8 + j] = (uint8_t)(value >> (j * 8));
-        }
-    }
-
-    return 1;
-}
