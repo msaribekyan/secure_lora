@@ -22,7 +22,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "usbd_cdc_if.h"
+#include "comms.h"
+#include "lora.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -61,6 +63,7 @@ const uint8_t my_data[] __attribute__((section(".secret_storage"))) = {
     0x11, 0x22, 0x33, 0x44,
     0x55, 0x66, 0x77, 0x88
 };
+
 /* USER CODE END 0 */
 
 /**
@@ -71,7 +74,8 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  lora_packet_t tmp_lora_packet = {0};
+  uint8_t status = 0;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -95,6 +99,14 @@ int main(void)
   MX_SPI1_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
+ 
+  comms_init(
+	&hspi1,
+	LORA_NSS_GPIO_Port,
+	LORA_NSS_Pin,
+	LORA_RST_GPIO_Port,
+	LORA_RST_Pin
+  );
 
   /* USER CODE END 2 */
 
@@ -102,10 +114,41 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	if (comms_check_radio_rxne() == 1) // check if there is a packet to receive
+	{
+		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
+		status = receive_packet(&tmp_lora_packet);
+		if (status == 1)
+		{
+			CDC_Transmit_FS(tmp_lora_packet.data, tmp_lora_packet.length);
+		}
+		// receive
+		// decode
+		// send over usbd_cdc_if
+		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
+	}
+	else if (comms_check_radio_txne() == 1) // check if there is a packet to transmit
+	{
+		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
+		status = radio_tx_queue_remove(&tmp_lora_packet);
+		if (status == 1)
+			transmit_packet(&tmp_lora_packet);
+		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
+	} else if (comms_check_usb_rxne() == 1) // check if there is a packet to prepare
+	{
+		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
+		status = process_usb_packet(&tmp_lora_packet);
+		if (status == 1)
+			radio_tx_queue_add(tmp_lora_packet);
+		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
+	}
+	// check_receive_buffer();
+	/*
 	HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
 	HAL_Delay(1000);
 	HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
 	HAL_Delay(1000);
+	*/
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -178,11 +221,11 @@ static void MX_SPI1_Init(void)
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_4BIT;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
