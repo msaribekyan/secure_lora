@@ -59,10 +59,6 @@ static void MX_SPI1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-const uint8_t my_data[] __attribute__((section(".secret_storage"))) = {
-    0x11, 0x22, 0x33, 0x44,
-    0x55, 0x66, 0x77, 0x88
-};
 
 /* USER CODE END 0 */
 

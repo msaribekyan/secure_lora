@@ -1,4 +1,5 @@
 #include "lora.h"
+#include "lora_reg.h"
 
 void lora_reset(lora_t *lora)
 {

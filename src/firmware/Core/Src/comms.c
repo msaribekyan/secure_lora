@@ -13,6 +13,10 @@ static uint8_t usb_rx_packet[64] = {0};
 static uint8_t usb_rx_packet_len = 0;
 static uint8_t usb_rx_available = 0;
 
+const uint8_t my_data[] __attribute__((section(".secret_storage"))) = {
+    0x11, 0x22, 0x33, 0x44,
+    0x55, 0x66, 0x77, 0x88
+};
 
 uint8_t radio_tx_queue_add(lora_packet_t packet)
 {
@@ -47,7 +51,7 @@ void transmit_packet(lora_packet_t *packet)
 	lora_setup_rx(&lora);
 }
 
-uint8_t check_lora_version(void)
+uint8_t check_radio_version(void)
 {
 	return lora_version(&lora);
 }

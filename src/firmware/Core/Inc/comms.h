@@ -32,7 +32,8 @@ void comms_init(
 	GPIO_TypeDef *cs_port,
 	uint16_t cs_pin,
 	GPIO_TypeDef *reset_port,
-	uint16_t reset_pin);
+	uint16_t reset_pin
+);
 void usb_receive_callback(uint8_t *data, uint8_t len);
 uint8_t receive_packet(lora_packet_t *packet);
 void transmit_packet(lora_packet_t *packet);
@@ -46,6 +47,6 @@ uint8_t radio_tx_queue_remove(lora_packet_t *packet);
 
 uint8_t process_usb_packet(lora_packet_t *packet);;
 
-uint8_t check_lora_version(void);
+uint8_t check_radio_version(void);
 
 #endif // COMMS_H
