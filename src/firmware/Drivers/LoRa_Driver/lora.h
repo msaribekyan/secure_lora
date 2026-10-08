@@ -3,7 +3,7 @@
 
 #define LORA_TIMEOUT 1000
 
-#include "main.h"
+#include "stm32f0xx_hal.h"
 
 typedef struct lora_s
 {
