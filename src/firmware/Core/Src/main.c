@@ -116,11 +116,9 @@ int main(void)
 		status = receive_packet(&tmp_lora_packet);
 		if (status == 1)
 		{
+			// decode
 			CDC_Transmit_FS(tmp_lora_packet.data, tmp_lora_packet.length);
 		}
-		// receive
-		// decode
-		// send over usbd_cdc_if
 		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
 	}
 	else if (comms_check_radio_txne() == 1) // check if there is a packet to transmit
@@ -135,7 +133,10 @@ int main(void)
 		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
 		status = process_usb_packet(&tmp_lora_packet);
 		if (status == 1)
+		{
+			tmp_lora_packet = encrypt_packet(tmp_lora_packet); // Encrypt
 			radio_tx_queue_add(tmp_lora_packet);
+		}
 		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
 	}
 	// check_receive_buffer();

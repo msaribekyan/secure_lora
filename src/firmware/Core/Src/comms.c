@@ -1,4 +1,5 @@
 #include "main.h"
+#include "aes.h"
 #include "comms.h"
 #include "crc16-ccitt-algorithm.h"
 
@@ -13,9 +14,11 @@ static uint8_t usb_rx_packet[64] = {0};
 static uint8_t usb_rx_packet_len = 0;
 static uint8_t usb_rx_available = 0;
 
-const uint8_t my_data[] __attribute__((section(".secret_storage"))) = {
-    0x11, 0x22, 0x33, 0x44,
-    0x55, 0x66, 0x77, 0x88
+const uint8_t aes_key[16] __attribute__((section(".secret_storage"))) = {
+    0xE0, 0x3E, 0xA3, 0xF6,
+    0xDB, 0xC1, 0x61, 0xC0,
+    0x74, 0x01, 0x04, 0x5C,
+    0x70, 0x62, 0x9A, 0xE6
 };
 
 uint8_t radio_tx_queue_add(lora_packet_t packet)
@@ -55,6 +58,29 @@ uint8_t check_radio_version(void)
 {
 	return lora_version(&lora);
 }
+
+
+lora_packet_t encrypt_packet(lora_packet_t packet)
+{
+	lora_packet_t new_packet = {0};
+	uint8_t new_len = (packet.length + 15) & 0xF0;
+	uint8_t nb_blocks = new_len / 16;
+
+	// Zero pad
+	for (uint8_t i = packet.length;i < 64;i++)
+	{
+		packet.data[i] = 0;
+	}
+
+	for (uint8_t i = 0;i < nb_blocks;i++)
+	{
+		aes128_encrypt_block(aes_key, packet.data + (i * 16), new_packet.data + (i * 16));
+	}
+
+	new_packet.length = new_len;
+	return new_packet;
+}
+
 
 /*
 packet_t packet_create(uint8_t *data, uint8_t len)

@@ -1,7 +1,7 @@
 #include "lora.h"
 #include "lora_reg.h"
 
-void lora_reset(lora_t *lora)
+static void lora_reset(lora_t *lora)
 {
 	HAL_Delay(20);
 	HAL_GPIO_WritePin(lora->reset_port, lora->reset_pin, GPIO_PIN_RESET);
@@ -10,7 +10,7 @@ void lora_reset(lora_t *lora)
 	HAL_Delay(20);
 }
 
-void lora_spi_write_reg(lora_t *lora, uint8_t reg, uint8_t* data, uint16_t len)
+static void lora_spi_write_reg(lora_t *lora, uint8_t reg, uint8_t* data, uint16_t len)
 {
 	HAL_GPIO_WritePin(lora->cs_port, lora->cs_pin, GPIO_PIN_RESET);
 	reg |= 0x80;
@@ -21,7 +21,7 @@ void lora_spi_write_reg(lora_t *lora, uint8_t reg, uint8_t* data, uint16_t len)
 	HAL_GPIO_WritePin(lora->cs_port, lora->cs_pin, GPIO_PIN_SET);
 }
 
-void lora_spi_read_reg(lora_t *lora, uint8_t reg, uint8_t *data, uint16_t len)
+static void lora_spi_read_reg(lora_t *lora, uint8_t reg, uint8_t *data, uint16_t len)
 {
 	HAL_GPIO_WritePin(lora->cs_port, lora->cs_pin, GPIO_PIN_RESET);
 	HAL_SPI_Transmit(lora->hspi, &reg, 1, 1000);
@@ -31,17 +31,17 @@ void lora_spi_read_reg(lora_t *lora, uint8_t reg, uint8_t *data, uint16_t len)
 	HAL_GPIO_WritePin(lora->cs_port, lora->cs_pin, GPIO_PIN_SET);
 }
 
-void lora_write_reg(lora_t *lora, uint8_t reg, uint8_t val)
+static inline void lora_write_reg(lora_t *lora, uint8_t reg, uint8_t val)
 {
 	lora_spi_write_reg(lora, reg, &val, 1);
 }
 
-void lora_write_reg_burst(lora_t *lora, uint8_t reg, uint8_t *val, uint16_t len)
+static inline void lora_write_reg_burst(lora_t *lora, uint8_t reg, uint8_t *val, uint16_t len)
 {
 	lora_spi_write_reg(lora, reg, val, len);
 }
 
-uint8_t lora_read_reg(lora_t *lora, uint8_t reg)
+static uint8_t lora_read_reg(lora_t *lora, uint8_t reg)
 {
 	uint8_t data = 0;
 
