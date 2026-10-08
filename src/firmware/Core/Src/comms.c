@@ -81,7 +81,19 @@ lora_packet_t encrypt_packet(lora_packet_t packet)
 	return new_packet;
 }
 
+lora_packet_t decrypt_packet(lora_packet_t packet)
+{
+	lora_packet_t new_packet = {0};
+	uint8_t new_len = (packet.length + 15) & 0xF0;
+	uint8_t nb_blocks = new_len / 16;
 
+	for (uint8_t i = 0;i < nb_blocks;i++)
+	{
+		aes128_decrypt_block(aes_key, packet.data + (i * 16), new_packet.data + (i * 16));
+	}
+	new_packet.length = new_len;
+	return new_packet;
+}
 /*
 packet_t packet_create(uint8_t *data, uint8_t len)
 {

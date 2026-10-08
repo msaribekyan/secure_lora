@@ -50,5 +50,6 @@ uint8_t process_usb_packet(lora_packet_t *packet);;
 uint8_t check_radio_version(void);
 
 lora_packet_t encrypt_packet(lora_packet_t packet);
+lora_packet_t decrypt_packet(lora_packet_t packet);
 
 #endif // COMMS_H

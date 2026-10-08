@@ -8,5 +8,6 @@
 
 
 void aes128_encrypt_block(const uint8_t key[AES_KEY_SIZE], const uint8_t input[AES_BLOCK_SIZE], uint8_t output[AES_BLOCK_SIZE]);
+void aes128_decrypt_block(const uint8_t key[AES_KEY_SIZE], const uint8_t input[AES_BLOCK_SIZE], uint8_t output[AES_BLOCK_SIZE]);
 
 #endif // AES_H

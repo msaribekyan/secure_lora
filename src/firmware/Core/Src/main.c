@@ -116,7 +116,7 @@ int main(void)
 		status = receive_packet(&tmp_lora_packet);
 		if (status == 1)
 		{
-			// decode
+			tmp_lora_packet = decrypt_packet(tmp_lora_packet);
 			CDC_Transmit_FS(tmp_lora_packet.data, tmp_lora_packet.length);
 		}
 		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
