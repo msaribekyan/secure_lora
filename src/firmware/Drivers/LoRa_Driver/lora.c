@@ -82,7 +82,7 @@ void lora_setup_rx(lora_t *lora)
 
 void lora_setup_tx(lora_t *lora)
 {
-	lora_write_reg(lora, REG_OP_MODE, 0x80); // LoRa + Sleep
+	lora_write_reg(lora, REG_OP_MODE, 0x81); // LoRa + Standby
 
 	lora_write_reg(lora, REG_FIFO_TX_BASE_ADDR, 0x00);
 	lora_write_reg(lora, REG_FIFO_ADDR_PTR, 0x00);
