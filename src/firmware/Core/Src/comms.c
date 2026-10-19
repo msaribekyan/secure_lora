@@ -2,10 +2,17 @@
 #include "aes.h"
 #include "comms.h"
 #include "crc16-ccitt-algorithm.h"
+#include "spi.h"
 
-static lora_t lora = {0};
+static lora_t lora = {
+	.hspi = &hspi1,
+	.cs_port = LORA_NSS_GPIO_Port,
+	.cs_pin = LORA_NSS_Pin,
+	.reset_port = LORA_RST_GPIO_Port,
+	.reset_pin = LORA_RST_Pin
+};
 
-static lora_packet_t radio_tx_queue[TX_QUEUE_SIZE];
+static radio_packet_t radio_tx_queue[TX_QUEUE_SIZE];
 static uint8_t radio_tx_queue_head = 0;
 static uint8_t radio_tx_queue_tail = 0;
 static uint8_t radio_tx_queue_count = 0;
@@ -21,7 +28,7 @@ const uint8_t aes_key[16] __attribute__((section(".secret_storage"))) = {
     0x70, 0x62, 0x9A, 0xE6
 };
 
-uint8_t radio_tx_queue_add(lora_packet_t packet)
+uint8_t radio_tx_queue_add(radio_packet_t packet)
 {
 	if (radio_tx_queue_count == TX_QUEUE_SIZE)
 		return 0;
@@ -31,7 +38,7 @@ uint8_t radio_tx_queue_add(lora_packet_t packet)
 	return 1;
 }
 
-uint8_t radio_tx_queue_remove(lora_packet_t *packet)
+uint8_t radio_tx_queue_remove(radio_packet_t *packet)
 {
 	if (radio_tx_queue_count == 0)
 		return 0;
@@ -41,13 +48,13 @@ uint8_t radio_tx_queue_remove(lora_packet_t *packet)
 	return 1;
 }
 
-uint8_t receive_packet(lora_packet_t *packet)
+uint8_t receive_packet(radio_packet_t *packet)
 {
 	packet->length = lora_receive(&lora, packet->data);	
 	return 1;
 }
 
-void transmit_packet(lora_packet_t *packet)
+void transmit_packet(radio_packet_t *packet)
 {
 	lora_setup_tx(&lora);
 	lora_transmit(&lora, packet->data, packet->length);
@@ -60,9 +67,9 @@ uint8_t check_radio_version(void)
 }
 
 
-lora_packet_t encrypt_packet(lora_packet_t packet)
+radio_packet_t encrypt_packet(radio_packet_t packet)
 {
-	lora_packet_t new_packet = {0};
+	radio_packet_t new_packet = {0};
 	uint8_t new_len = (packet.length + 15) & 0xF0;
 	uint8_t nb_blocks = new_len / 16;
 
@@ -81,9 +88,9 @@ lora_packet_t encrypt_packet(lora_packet_t packet)
 	return new_packet;
 }
 
-lora_packet_t decrypt_packet(lora_packet_t packet)
+radio_packet_t decrypt_packet(radio_packet_t packet)
 {
-	lora_packet_t new_packet = {0};
+	radio_packet_t new_packet = {0};
 	uint8_t new_len = (packet.length + 15) & 0xF0;
 	uint8_t nb_blocks = new_len / 16;
 
@@ -114,19 +121,8 @@ packet_t packet_create(uint8_t *data, uint8_t len)
 }
 */
 
-void comms_init(
-	SPI_HandleTypeDef *hspi,
-	GPIO_TypeDef *cs_port,
-	uint16_t cs_pin,
-	GPIO_TypeDef *reset_port,
-	uint16_t reset_pin
-)
+void comms_init()
 {
-	lora.hspi = hspi;
-	lora.cs_port = cs_port;
-	lora.cs_pin = cs_pin;
-	lora.reset_port = reset_port;
-	lora.reset_pin = reset_pin;
 	lora_init(&lora);
 	lora_setup_rx(&lora);
 }
@@ -164,7 +160,7 @@ void usb_receive_callback(uint8_t *data, uint8_t len)
 	usb_rx_available = 1;
 }
 
-uint8_t process_usb_packet(lora_packet_t *packet)
+uint8_t process_usb_packet(radio_packet_t *packet)
 {
 	if (usb_rx_available == 0)
 		return 0;

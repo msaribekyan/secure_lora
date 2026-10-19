@@ -18,13 +18,13 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "spi.h"
 #include "usb_device.h"
+#include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "usbd_cdc_if.h"
-#include "comms.h"
-#include "lora.h"
+#include "app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -43,7 +43,6 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-SPI_HandleTypeDef hspi1;
 
 /* USER CODE BEGIN PV */
 
@@ -51,8 +50,6 @@ SPI_HandleTypeDef hspi1;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -70,8 +67,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-  lora_packet_t tmp_lora_packet = {0};
-  uint8_t status = 0;
+
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -95,57 +91,14 @@ int main(void)
   MX_SPI1_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
- 
-  comms_init(
-	&hspi1,
-	LORA_NSS_GPIO_Port,
-	LORA_NSS_Pin,
-	LORA_RST_GPIO_Port,
-	LORA_RST_Pin
-  );
-
+  app_init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	if (comms_check_radio_rxne() == 1) // check if there is a packet to receive
-	{
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
-		status = receive_packet(&tmp_lora_packet);
-		if (status == 1)
-		{
-			tmp_lora_packet = decrypt_packet(tmp_lora_packet);
-			CDC_Transmit_FS(tmp_lora_packet.data, tmp_lora_packet.length);
-		}
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
-	}
-	else if (comms_check_radio_txne() == 1) // check if there is a packet to transmit
-	{
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
-		status = radio_tx_queue_remove(&tmp_lora_packet);
-		if (status == 1)
-			transmit_packet(&tmp_lora_packet);
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
-	} else if (comms_check_usb_rxne() == 1) // check if there is a packet to prepare
-	{
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
-		status = process_usb_packet(&tmp_lora_packet);
-		if (status == 1)
-		{
-			tmp_lora_packet = encrypt_packet(tmp_lora_packet); // Encrypt
-			radio_tx_queue_add(tmp_lora_packet);
-		}
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
-	}
-	// check_receive_buffer();
-	/*
-	HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
-	HAL_Delay(1000);
-	HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
-	HAL_Delay(1000);
-	*/
+    app_loop();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -197,84 +150,6 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-}
-
-/**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_SPI1_Init(void)
-{
-
-  /* USER CODE BEGIN SPI1_Init 0 */
-
-  /* USER CODE END SPI1_Init 0 */
-
-  /* USER CODE BEGIN SPI1_Init 1 */
-
-  /* USER CODE END SPI1_Init 1 */
-  /* SPI1 parameter configuration*/
-  hspi1.Instance = SPI1;
-  hspi1.Init.Mode = SPI_MODE_MASTER;
-  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
-  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
-  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi1.Init.CRCPolynomial = 7;
-  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
-  hspi1.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN SPI1_Init 2 */
-
-  /* USER CODE END SPI1_Init 2 */
-
-}
-
-/**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_GPIO_Init(void)
-{
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-/* USER CODE BEGIN MX_GPIO_Init_1 */
-/* USER CODE END MX_GPIO_Init_1 */
-
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOF_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, LORA_RST_Pin|LORA_NSS_Pin, GPIO_PIN_SET);
-
-  /*Configure GPIO pins : LED_Pin LORA_RST_Pin LORA_NSS_Pin */
-  GPIO_InitStruct.Pin = LED_Pin|LORA_RST_Pin|LORA_NSS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : LORA_DIO0_Pin */
-  GPIO_InitStruct.Pin = LORA_DIO0_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(LORA_DIO0_GPIO_Port, &GPIO_InitStruct);
-
-/* USER CODE BEGIN MX_GPIO_Init_2 */
-/* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
