@@ -38,9 +38,13 @@ BUILD_DIR = build
 C_SOURCES =  \
 Core/Src/main.c \
 Core/Src/app.c \
-Core/Src/comms.c \
-Core/Src/aes.c \
-Drivers/LoRa_Driver/lora.c \
+services/serial/serial.c \
+services/radio/radio.c \
+services/radio/radio_link.c \
+services/crypto/crc.c \
+Drivers/lora_driver/lora.c \
+Drivers/timing/timing.c \
+Drivers/led/led.c \
 Core/Src/stm32f0xx_it.c \
 Core/Src/stm32f0xx_hal_msp.c \
 USB_DEVICE/App/usb_device.c \
@@ -136,14 +140,18 @@ C_INCLUDES =  \
 -IUSB_DEVICE/App \
 -IUSB_DEVICE/Target \
 -ICore/Inc \
--IDrivers/LoRa_Driver \
+-Iservices/radio \
+-Iservices/serial \
+-Iservices/crypto \
+-IDrivers/lora_driver \
+-IDrivers/timing \
+-IDrivers/led \
 -IDrivers/STM32F0xx_HAL_Driver/Inc \
 -IDrivers/STM32F0xx_HAL_Driver/Inc/Legacy \
 -IMiddlewares/ST/STM32_USB_Device_Library/Core/Inc \
 -IMiddlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc \
 -IDrivers/CMSIS/Device/ST/STM32F0xx/Include \
 -IDrivers/CMSIS/Include
-
 
 # compile gcc flags
 ASFLAGS = $(MCU) $(AS_DEFS) $(AS_INCLUDES) $(OPT) -Wall -fdata-sections -ffunction-sections

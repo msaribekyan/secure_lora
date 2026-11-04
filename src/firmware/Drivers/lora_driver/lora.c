@@ -101,7 +101,7 @@ void lora_transmit(lora_t *lora, uint8_t *data, uint8_t len)
 			start_tick + LORA_TIMEOUT > HAL_GetTick());
 }
 
-uint8_t lora_receive(lora_t *lora, uint8_t *data)
+uint8_t lora_receive(lora_t *lora, uint8_t *data, uint8_t max_len)
 {
 	uint8_t fifo_addr = 0;
 	uint8_t i = 0;
@@ -110,21 +110,27 @@ uint8_t lora_receive(lora_t *lora, uint8_t *data)
 	len = lora_read_reg(lora, REG_RX_NB_BYTES);
 	fifo_addr = lora_read_reg(lora, REG_FIFO_RX_CURRENT_ADDR);
 	lora_write_reg(lora, REG_FIFO_ADDR_PTR, fifo_addr);
+	
 	i = 0;
-	while (i < len)
+	while (i < len && i < max_len)
 	{
 		data[i] = lora_read_reg(lora, REG_FIFO);
+		i++;
+	}
+	while (i < len)
+	{
+		lora_read_reg(lora, REG_FIFO);
 		i++;
 	}
 	lora_write_reg(lora, REG_IRQ_FLAGS, 0x40);
 	return len;
 }
 
-uint8_t lora_check_rx(lora_t *lora)
+bool lora_check_rx(lora_t *lora)
 {
 	if ((lora_read_reg(lora, REG_IRQ_FLAGS) & 0x40) != 0)
-		return 1;
-	return 0;
+		return true;
+	return false;
 }
 
 uint8_t lora_version(lora_t *lora)

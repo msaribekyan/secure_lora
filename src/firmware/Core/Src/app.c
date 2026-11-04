@@ -1,52 +1,101 @@
-#include "usbd_cdc_if.h"
-#include "comms.h"
-#include "lora.h"
+#include "radio.h"
+#include "serial.h"
+#include "led.h"
 
-radio_packet_t tmp_lora_packet = {0};
-uint8_t status = 0;
+// radio_packet_t tmp_lora_packet = {0};
+// uint8_t status = 0;
+
+static void app_receive_serial_packet(void)
+{
+	// TODO: receive usb packet, parse and do whatever needs to be done
+	// check if message type, ecrypt and stuff and add to transmit queue
+	// packet_t packet;
+
+	//if (!serial_rx_ready())
+	//	return;
+	serial_packet_t packet = {0};
+	packet_t radio_packet = {0};
+
+	serial_create_packet(&packet);
+	if (packet.length == 0)
+		return;
+
+	radio_packet.type = PACKET_TYPE_MESSAGE;
+	radio_packet.message.ciphertext_length = packet.length;
+	for (uint8_t i = 0;i < packet.length;i++)
+	{
+		radio_packet.message.ciphertext[i] = packet.data[i];
+	}
+	radio_queue_packet(&radio_packet);
+}
+/*
+static void app_process_serial_packet(void)
+{
+
+}
+*/
+
+static void app_receive_radio_packet(void)
+{
+	radio_receive_data();
+	radio_process_buffer();
+}
+
+static void app_process_radio_packet(void)
+{
+	packet_t packet;
+
+	if (radio_process_frame(&packet) != PACKET_OK)
+		return;
+
+	switch (packet.type)
+	{
+	case PACKET_TYPE_MESSAGE:
+		// TODO: decrypt
+		serial_transmit(
+			packet.message.ciphertext,
+			packet.message.ciphertext_length
+		); // TODO: fix the send over usb
+		break;
+	// TODO: key exchange algorithm
+	default:
+		break;
+	}
+}
 
 void app_init(void)
 {
-	comms_init();
+	radio_init();
+	serial_init();
 }
 
 void app_loop(void)
 {
-if (comms_check_radio_rxne() == 1) // check if there is a packet to receive
+	if (radio_rx_ready()) // Packet available for receive
 	{
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
-		status = receive_packet(&tmp_lora_packet);
-		if (status == 1)
-		{
-			tmp_lora_packet = decrypt_packet(tmp_lora_packet);
-			CDC_Transmit_FS(tmp_lora_packet.data, tmp_lora_packet.length);
-		}
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
+		led_on();
+		app_receive_radio_packet();
+		led_off();
 	}
-	else if (comms_check_radio_txne() == 1) // check if there is a packet to transmit
+	else if (radio_txne()) // Packet available for transmit
 	{
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
-		status = radio_tx_queue_remove(&tmp_lora_packet);
-		if (status == 1)
-			transmit_packet(&tmp_lora_packet);
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
-	} else if (comms_check_usb_rxne() == 1) // check if there is a packet to prepare
-	{
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
-		status = process_usb_packet(&tmp_lora_packet);
-		if (status == 1)
-		{
-			tmp_lora_packet = encrypt_packet(tmp_lora_packet); // Encrypt
-			radio_tx_queue_add(tmp_lora_packet);
-		}
-		HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
+		radio_transmit_queue();
 	}
-	// check_receive_buffer();
+	if (radio_rxne()) // Radio packet available for processing
+	{
+		app_process_radio_packet();
+	}
+	if (serial_rx_ready()) // Serial packet available to receive
+	{
+		led_on();
+		app_receive_serial_packet();
+		led_off();
+	}
 	/*
-	HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, SET);
-	HAL_Delay(1000);
-	HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, RESET);
-	HAL_Delay(1000);
+	if (serial_rxne()) // Serial packet available for processing
+	{
+		app_process_serial_packet();
+	}
 	*/
-
 }
+

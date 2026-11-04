@@ -22,7 +22,7 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
-#include "comms.h"
+#include "serial.h"
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -266,7 +266,7 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
     len = 255;
   else
     len = (uint8_t) *Len;
-  usb_receive_callback(Buf, len);
+  serial_receive_callback(Buf, len);
     
   return (USBD_OK);
   /* USER CODE END 6 */
