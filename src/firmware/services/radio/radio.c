@@ -9,8 +9,8 @@
 
 #define RX_BUFFER_SIZE 128
 #define TX_BUFFER_SIZE 128
-#define RX_QUEUE_SIZE 3
-#define TX_QUEUE_SIZE 3
+#define RX_QUEUE_SIZE 2
+#define TX_QUEUE_SIZE 2
 
 static lora_t lora = {
 	.hspi = &hspi1,
@@ -89,6 +89,8 @@ static packet_status_t parse_frame(frame_t *frame, packet_t *packet)
 		packet->message.counter |= (uint32_t) frame->data[4] << 8;
 		packet->message.counter |= (uint32_t) frame->data[5];
 		packet->message.ciphertext_length = frame->data[6];
+		// if (frame->length != 23 + packet->message.ciphertext_length)
+		// 	return PACKET_ERROR; // Wrong packet length
 		for (uint8_t i = 0;i < packet->message.ciphertext_length;i++)
 		{
 			packet->message.ciphertext[i] = frame->data[7 + i];
