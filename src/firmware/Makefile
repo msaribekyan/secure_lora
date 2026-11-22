@@ -42,6 +42,9 @@ services/serial/serial.c \
 services/radio/radio.c \
 services/radio/radio_link.c \
 services/crypto/crc.c \
+services/crypto/x25519.c \
+services/crypto/kdf.c \
+Core/Src/aes.c \
 Drivers/lora_driver/lora.c \
 Drivers/timing/timing.c \
 Drivers/led/led.c \
