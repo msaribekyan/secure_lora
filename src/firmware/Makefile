@@ -42,6 +42,9 @@ services/serial/serial.c \
 services/radio/radio.c \
 services/radio/radio_link.c \
 services/crypto/crc.c \
+services/crypto/aes_gcm.c \
+services/crypto/jitter_rng.c \
+services/crypto/rng.c \
 Drivers/lora_driver/lora.c \
 Drivers/timing/timing.c \
 Drivers/led/led.c \
