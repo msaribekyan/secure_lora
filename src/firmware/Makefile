@@ -44,6 +44,8 @@ services/radio/radio_link.c \
 services/crypto/crc.c \
 services/crypto/x25519.c \
 services/crypto/kdf.c \
+services/crypto/confirm.c \
+services/crypto/aes_gcm.c \
 Core/Src/aes.c \
 Drivers/lora_driver/lora.c \
 Drivers/timing/timing.c \
