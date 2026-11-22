@@ -46,6 +46,7 @@ services/crypto/confirm.c \
 services/crypto/aes_gcm.c \
 services/crypto/jitter_rng.c \
 services/crypto/rng.c \
+services/crypto/crypto.c \
 services/crypto/x25519.c \
 services/crypto/kdf.c \
 Core/Src/aes.c \
