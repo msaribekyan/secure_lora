@@ -1,0 +1,1212 @@
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 1
+
+
+   1              		.cpu cortex-m0
+   2              		.arch armv6s-m
+   3              		.fpu softvfp
+   4              		.eabi_attribute 20, 1
+   5              		.eabi_attribute 21, 1
+   6              		.eabi_attribute 23, 3
+   7              		.eabi_attribute 24, 1
+   8              		.eabi_attribute 25, 1
+   9              		.eabi_attribute 26, 1
+  10              		.eabi_attribute 30, 1
+  11              		.eabi_attribute 34, 0
+  12              		.eabi_attribute 18, 4
+  13              		.file	"rng.c"
+  14              		.text
+  15              	.Ltext0:
+  16              		.cfi_sections	.debug_frame
+  17              		.file 1 "services/crypto/rng.c"
+  18              		.section	.text.wipe,"ax",%progbits
+  19              		.align	1
+  20              		.syntax unified
+  21              		.code	16
+  22              		.thumb_func
+  24              	wipe:
+  25              	.LVL0:
+  26              	.LFB0:
+   1:services/crypto/rng.c **** #include "rng.h"
+   2:services/crypto/rng.c **** #include "jitter_rng.h"
+   3:services/crypto/rng.c **** #include "../../Core/Inc/aes.h"   /* aes128_encrypt_block(key, in, out) */
+   4:services/crypto/rng.c **** 
+   5:services/crypto/rng.c **** /*
+   6:services/crypto/rng.c ****  * rng.c: AES-128 CTR_DRBG (NIST SP 800-90A Rev.1, no derivation function)
+   7:services/crypto/rng.c ****  *
+   8:services/crypto/rng.c ****  * Entropy input: jitter_rng_fill(seed, 32). That is already conditioned
+   9:services/crypto/rng.c ****  * (AES-CBC-MAC), so it is used directly as the 256-bit seed (seedlen = 256
+  10:services/crypto/rng.c ****  * for AES-128 without df).
+  11:services/crypto/rng.c ****  *
+  12:services/crypto/rng.c ****  * State: Key (16), V (16), reseed counter. About 40 bytes of RAM.
+  13:services/crypto/rng.c ****  */
+  14:services/crypto/rng.c **** 
+  15:services/crypto/rng.c **** #define RNG_SEEDLEN          32u
+  16:services/crypto/rng.c **** #define RNG_RESEED_INTERVAL  256u   /* generate calls between automatic reseeds */
+  17:services/crypto/rng.c **** 
+  18:services/crypto/rng.c **** static uint8_t  s_key[16];
+  19:services/crypto/rng.c **** static uint8_t  s_v[16];
+  20:services/crypto/rng.c **** static uint16_t s_reseed_ctr;
+  21:services/crypto/rng.c **** static uint8_t  s_inst;      /* DRBG instantiated */
+  22:services/crypto/rng.c **** static uint8_t  s_fault;     /* latched */
+  23:services/crypto/rng.c **** 
+  24:services/crypto/rng.c **** static void wipe(volatile uint8_t *p, uint8_t n)
+  25:services/crypto/rng.c **** {
+  27              		.loc 1 25 1 view -0
+  28              		.cfi_startproc
+  29              		@ args = 0, pretend = 0, frame = 0
+  30              		@ frame_needed = 0, uses_anonymous_args = 0
+  31              		@ link register save eliminated.
+  26:services/crypto/rng.c ****     while (n--)
+  32              		.loc 1 26 5 view .LVU1
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 2
+
+
+  33              		.loc 1 26 11 is_stmt 0 view .LVU2
+  34 0000 03E0     		b	.L2
+  35              	.LVL1:
+  36              	.L3:
+  27:services/crypto/rng.c ****         *p++ = 0u;
+  37              		.loc 1 27 9 is_stmt 1 view .LVU3
+  38              		.loc 1 27 14 is_stmt 0 view .LVU4
+  39 0002 0022     		movs	r2, #0
+  40 0004 0270     		strb	r2, [r0]
+  26:services/crypto/rng.c ****     while (n--)
+  41              		.loc 1 26 13 view .LVU5
+  42 0006 1900     		movs	r1, r3
+  43              		.loc 1 27 11 view .LVU6
+  44 0008 0130     		adds	r0, r0, #1
+  45              	.LVL2:
+  46              	.L2:
+  26:services/crypto/rng.c ****     while (n--)
+  47              		.loc 1 26 12 is_stmt 1 view .LVU7
+  26:services/crypto/rng.c ****     while (n--)
+  48              		.loc 1 26 13 is_stmt 0 view .LVU8
+  49 000a 4B1E     		subs	r3, r1, #1
+  50 000c DBB2     		uxtb	r3, r3
+  51              	.LVL3:
+  26:services/crypto/rng.c ****     while (n--)
+  52              		.loc 1 26 12 view .LVU9
+  53 000e 0029     		cmp	r1, #0
+  54 0010 F7D1     		bne	.L3
+  28:services/crypto/rng.c **** }
+  55              		.loc 1 28 1 view .LVU10
+  56              		@ sp needed
+  57 0012 7047     		bx	lr
+  58              		.cfi_endproc
+  59              	.LFE0:
+  61              		.section	.text.v_inc,"ax",%progbits
+  62              		.align	1
+  63              		.syntax unified
+  64              		.code	16
+  65              		.thumb_func
+  67              	v_inc:
+  68              	.LFB1:
+  29:services/crypto/rng.c **** 
+  30:services/crypto/rng.c **** static void v_inc(void)                          /* V = (V + 1) mod 2^128, big endian */
+  31:services/crypto/rng.c **** {
+  69              		.loc 1 31 1 is_stmt 1 view -0
+  70              		.cfi_startproc
+  71              		@ args = 0, pretend = 0, frame = 0
+  72              		@ frame_needed = 0, uses_anonymous_args = 0
+  73              		@ link register save eliminated.
+  32:services/crypto/rng.c ****     for (int8_t i = 15; i >= 0; i--)
+  74              		.loc 1 32 5 view .LVU12
+  75              	.LBB2:
+  76              		.loc 1 32 10 view .LVU13
+  77              	.LVL4:
+  78              		.loc 1 32 17 is_stmt 0 view .LVU14
+  79 0000 0F22     		movs	r2, #15
+  80              	.LVL5:
+  81              	.L5:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 3
+
+
+  82              		.loc 1 32 27 is_stmt 1 discriminator 1 view .LVU15
+  83 0002 002A     		cmp	r2, #0
+  84 0004 09DB     		blt	.L4
+  33:services/crypto/rng.c ****         if (++s_v[i] != 0u)
+  85              		.loc 1 33 9 view .LVU16
+  86              		.loc 1 33 18 is_stmt 0 view .LVU17
+  87 0006 0549     		ldr	r1, .L8
+  88 0008 8B5C     		ldrb	r3, [r1, r2]
+  89              		.loc 1 33 13 view .LVU18
+  90 000a 0133     		adds	r3, r3, #1
+  91 000c DBB2     		uxtb	r3, r3
+  92              		.loc 1 33 12 view .LVU19
+  93 000e 8B54     		strb	r3, [r1, r2]
+  94 0010 002B     		cmp	r3, #0
+  95 0012 02D1     		bne	.L4
+  32:services/crypto/rng.c ****     for (int8_t i = 15; i >= 0; i--)
+  96              		.loc 1 32 34 is_stmt 1 discriminator 2 view .LVU20
+  97 0014 013A     		subs	r2, r2, #1
+  98              	.LVL6:
+  32:services/crypto/rng.c ****     for (int8_t i = 15; i >= 0; i--)
+  99              		.loc 1 32 34 is_stmt 0 discriminator 2 view .LVU21
+ 100 0016 52B2     		sxtb	r2, r2
+ 101              	.LVL7:
+  32:services/crypto/rng.c ****     for (int8_t i = 15; i >= 0; i--)
+ 102              		.loc 1 32 34 discriminator 2 view .LVU22
+ 103 0018 F3E7     		b	.L5
+ 104              	.LVL8:
+ 105              	.L4:
+  32:services/crypto/rng.c ****     for (int8_t i = 15; i >= 0; i--)
+ 106              		.loc 1 32 34 discriminator 2 view .LVU23
+ 107              	.LBE2:
+  34:services/crypto/rng.c ****             break;
+  35:services/crypto/rng.c **** }
+ 108              		.loc 1 35 1 view .LVU24
+ 109              		@ sp needed
+ 110 001a 7047     		bx	lr
+ 111              	.L9:
+ 112              		.align	2
+ 113              	.L8:
+ 114 001c 00000000 		.word	s_v
+ 115              		.cfi_endproc
+ 116              	.LFE1:
+ 118              		.section	.text.latch_fault,"ax",%progbits
+ 119              		.align	1
+ 120              		.syntax unified
+ 121              		.code	16
+ 122              		.thumb_func
+ 124              	latch_fault:
+ 125              	.LFB3:
+  36:services/crypto/rng.c **** 
+  37:services/crypto/rng.c **** /* CTR_DRBG_Update (90A 10.2.1.2). data == NULL means all-zero provided_data. */
+  38:services/crypto/rng.c **** static void drbg_update(const uint8_t *data)
+  39:services/crypto/rng.c **** {
+  40:services/crypto/rng.c ****     uint8_t temp[RNG_SEEDLEN];
+  41:services/crypto/rng.c **** 
+  42:services/crypto/rng.c ****     for (uint8_t b = 0u; b < 2u; b++)
+  43:services/crypto/rng.c ****     {
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 4
+
+
+  44:services/crypto/rng.c ****         v_inc();
+  45:services/crypto/rng.c ****         aes128_encrypt_block(s_key, s_v, &temp[16u * b]);
+  46:services/crypto/rng.c ****     }
+  47:services/crypto/rng.c ****     if (data != 0)
+  48:services/crypto/rng.c ****         for (uint8_t i = 0u; i < RNG_SEEDLEN; i++)
+  49:services/crypto/rng.c ****             temp[i] ^= data[i];
+  50:services/crypto/rng.c **** 
+  51:services/crypto/rng.c ****     for (uint8_t i = 0u; i < 16u; i++)
+  52:services/crypto/rng.c ****     {
+  53:services/crypto/rng.c ****         s_key[i] = temp[i];
+  54:services/crypto/rng.c ****         s_v[i]   = temp[16u + i];
+  55:services/crypto/rng.c ****     }
+  56:services/crypto/rng.c ****     wipe(temp, RNG_SEEDLEN);
+  57:services/crypto/rng.c **** }
+  58:services/crypto/rng.c **** 
+  59:services/crypto/rng.c **** static void latch_fault(void)
+  60:services/crypto/rng.c **** {
+ 126              		.loc 1 60 1 is_stmt 1 view -0
+ 127              		.cfi_startproc
+ 128              		@ args = 0, pretend = 0, frame = 0
+ 129              		@ frame_needed = 0, uses_anonymous_args = 0
+ 130 0000 10B5     		push	{r4, lr}
+ 131              	.LCFI0:
+ 132              		.cfi_def_cfa_offset 8
+ 133              		.cfi_offset 4, -8
+ 134              		.cfi_offset 14, -4
+  61:services/crypto/rng.c ****     s_fault = 1u;
+ 135              		.loc 1 61 5 view .LVU26
+ 136              		.loc 1 61 13 is_stmt 0 view .LVU27
+ 137 0002 074B     		ldr	r3, .L11
+ 138 0004 0122     		movs	r2, #1
+ 139 0006 1A70     		strb	r2, [r3]
+  62:services/crypto/rng.c ****     s_inst  = 0u;
+ 140              		.loc 1 62 5 is_stmt 1 view .LVU28
+ 141              		.loc 1 62 13 is_stmt 0 view .LVU29
+ 142 0008 064B     		ldr	r3, .L11+4
+ 143 000a 0022     		movs	r2, #0
+ 144 000c 1A70     		strb	r2, [r3]
+  63:services/crypto/rng.c ****     wipe(s_key, 16u);
+ 145              		.loc 1 63 5 is_stmt 1 view .LVU30
+ 146 000e 0648     		ldr	r0, .L11+8
+ 147 0010 1021     		movs	r1, #16
+ 148 0012 FFF7FEFF 		bl	wipe
+ 149              	.LVL9:
+  64:services/crypto/rng.c ****     wipe(s_v, 16u);
+ 150              		.loc 1 64 5 view .LVU31
+ 151 0016 0548     		ldr	r0, .L11+12
+ 152 0018 1021     		movs	r1, #16
+ 153 001a FFF7FEFF 		bl	wipe
+ 154              	.LVL10:
+  65:services/crypto/rng.c **** }
+ 155              		.loc 1 65 1 is_stmt 0 view .LVU32
+ 156              		@ sp needed
+ 157 001e 10BD     		pop	{r4, pc}
+ 158              	.L12:
+ 159              		.align	2
+ 160              	.L11:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 5
+
+
+ 161 0020 00000000 		.word	s_fault
+ 162 0024 00000000 		.word	s_inst
+ 163 0028 00000000 		.word	s_key
+ 164 002c 00000000 		.word	s_v
+ 165              		.cfi_endproc
+ 166              	.LFE3:
+ 168              		.section	.text.drbg_update,"ax",%progbits
+ 169              		.align	1
+ 170              		.syntax unified
+ 171              		.code	16
+ 172              		.thumb_func
+ 174              	drbg_update:
+ 175              	.LVL11:
+ 176              	.LFB2:
+  39:services/crypto/rng.c ****     uint8_t temp[RNG_SEEDLEN];
+ 177              		.loc 1 39 1 is_stmt 1 view -0
+ 178              		.cfi_startproc
+ 179              		@ args = 0, pretend = 0, frame = 32
+ 180              		@ frame_needed = 0, uses_anonymous_args = 0
+  39:services/crypto/rng.c ****     uint8_t temp[RNG_SEEDLEN];
+ 181              		.loc 1 39 1 is_stmt 0 view .LVU34
+ 182 0000 30B5     		push	{r4, r5, lr}
+ 183              	.LCFI1:
+ 184              		.cfi_def_cfa_offset 12
+ 185              		.cfi_offset 4, -12
+ 186              		.cfi_offset 5, -8
+ 187              		.cfi_offset 14, -4
+ 188 0002 89B0     		sub	sp, sp, #36
+ 189              	.LCFI2:
+ 190              		.cfi_def_cfa_offset 48
+ 191 0004 0400     		movs	r4, r0
+  40:services/crypto/rng.c **** 
+ 192              		.loc 1 40 5 is_stmt 1 view .LVU35
+  42:services/crypto/rng.c ****     {
+ 193              		.loc 1 42 5 view .LVU36
+ 194              	.LBB3:
+  42:services/crypto/rng.c ****     {
+ 195              		.loc 1 42 10 view .LVU37
+ 196              	.LVL12:
+  42:services/crypto/rng.c ****     {
+ 197              		.loc 1 42 18 is_stmt 0 view .LVU38
+ 198 0006 0025     		movs	r5, #0
+  42:services/crypto/rng.c ****     {
+ 199              		.loc 1 42 5 view .LVU39
+ 200 0008 0AE0     		b	.L14
+ 201              	.LVL13:
+ 202              	.L15:
+  44:services/crypto/rng.c ****         aes128_encrypt_block(s_key, s_v, &temp[16u * b]);
+ 203              		.loc 1 44 9 is_stmt 1 view .LVU40
+ 204 000a FFF7FEFF 		bl	v_inc
+ 205              	.LVL14:
+  45:services/crypto/rng.c ****     }
+ 206              		.loc 1 45 9 view .LVU41
+  45:services/crypto/rng.c ****     }
+ 207              		.loc 1 45 52 is_stmt 0 view .LVU42
+ 208 000e 2B01     		lsls	r3, r5, #4
+  45:services/crypto/rng.c ****     }
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 6
+
+
+ 209              		.loc 1 45 9 view .LVU43
+ 210 0010 6A46     		mov	r2, sp
+ 211 0012 D218     		adds	r2, r2, r3
+ 212 0014 1449     		ldr	r1, .L22
+ 213 0016 1548     		ldr	r0, .L22+4
+ 214 0018 FFF7FEFF 		bl	aes128_encrypt_block
+ 215              	.LVL15:
+  42:services/crypto/rng.c ****     {
+ 216              		.loc 1 42 35 is_stmt 1 discriminator 3 view .LVU44
+ 217 001c 0135     		adds	r5, r5, #1
+ 218              	.LVL16:
+  42:services/crypto/rng.c ****     {
+ 219              		.loc 1 42 35 is_stmt 0 discriminator 3 view .LVU45
+ 220 001e EDB2     		uxtb	r5, r5
+ 221              	.LVL17:
+ 222              	.L14:
+  42:services/crypto/rng.c ****     {
+ 223              		.loc 1 42 28 is_stmt 1 discriminator 1 view .LVU46
+ 224 0020 012D     		cmp	r5, #1
+ 225 0022 F2D9     		bls	.L15
+ 226              	.LBE3:
+  47:services/crypto/rng.c ****         for (uint8_t i = 0u; i < RNG_SEEDLEN; i++)
+ 227              		.loc 1 47 5 view .LVU47
+  47:services/crypto/rng.c ****         for (uint8_t i = 0u; i < RNG_SEEDLEN; i++)
+ 228              		.loc 1 47 8 is_stmt 0 view .LVU48
+ 229 0024 002C     		cmp	r4, #0
+ 230 0026 0AD0     		beq	.L17
+ 231              	.LBB4:
+  48:services/crypto/rng.c ****             temp[i] ^= data[i];
+ 232              		.loc 1 48 22 view .LVU49
+ 233 0028 0023     		movs	r3, #0
+ 234 002a 06E0     		b	.L16
+ 235              	.LVL18:
+ 236              	.L18:
+  49:services/crypto/rng.c **** 
+ 237              		.loc 1 49 13 is_stmt 1 view .LVU50
+  49:services/crypto/rng.c **** 
+ 238              		.loc 1 49 17 is_stmt 0 view .LVU51
+ 239 002c 6946     		mov	r1, sp
+ 240 002e CA5C     		ldrb	r2, [r1, r3]
+  49:services/crypto/rng.c **** 
+ 241              		.loc 1 49 28 view .LVU52
+ 242 0030 E05C     		ldrb	r0, [r4, r3]
+  49:services/crypto/rng.c **** 
+ 243              		.loc 1 49 21 view .LVU53
+ 244 0032 4240     		eors	r2, r0
+ 245 0034 CA54     		strb	r2, [r1, r3]
+  48:services/crypto/rng.c ****             temp[i] ^= data[i];
+ 246              		.loc 1 48 48 is_stmt 1 discriminator 3 view .LVU54
+ 247 0036 0133     		adds	r3, r3, #1
+ 248              	.LVL19:
+  48:services/crypto/rng.c ****             temp[i] ^= data[i];
+ 249              		.loc 1 48 48 is_stmt 0 discriminator 3 view .LVU55
+ 250 0038 DBB2     		uxtb	r3, r3
+ 251              	.LVL20:
+ 252              	.L16:
+  48:services/crypto/rng.c ****             temp[i] ^= data[i];
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 7
+
+
+ 253              		.loc 1 48 32 is_stmt 1 discriminator 1 view .LVU56
+ 254 003a 1F2B     		cmp	r3, #31
+ 255 003c F6D9     		bls	.L18
+ 256              	.LVL21:
+ 257              	.L17:
+  48:services/crypto/rng.c ****             temp[i] ^= data[i];
+ 258              		.loc 1 48 22 is_stmt 0 view .LVU57
+ 259 003e 0023     		movs	r3, #0
+ 260 0040 0AE0     		b	.L19
+ 261              	.LVL22:
+ 262              	.L20:
+  48:services/crypto/rng.c ****             temp[i] ^= data[i];
+ 263              		.loc 1 48 22 view .LVU58
+ 264              	.LBE4:
+ 265              	.LBB5:
+  53:services/crypto/rng.c ****         s_v[i]   = temp[16u + i];
+ 266              		.loc 1 53 9 is_stmt 1 view .LVU59
+  53:services/crypto/rng.c ****         s_v[i]   = temp[16u + i];
+ 267              		.loc 1 53 24 is_stmt 0 view .LVU60
+ 268 0042 6A46     		mov	r2, sp
+ 269 0044 D05C     		ldrb	r0, [r2, r3]
+  53:services/crypto/rng.c ****         s_v[i]   = temp[16u + i];
+ 270              		.loc 1 53 18 view .LVU61
+ 271 0046 0949     		ldr	r1, .L22+4
+ 272 0048 C854     		strb	r0, [r1, r3]
+  54:services/crypto/rng.c ****     }
+ 273              		.loc 1 54 9 is_stmt 1 view .LVU62
+  54:services/crypto/rng.c ****     }
+ 274              		.loc 1 54 29 is_stmt 0 view .LVU63
+ 275 004a 1900     		movs	r1, r3
+ 276 004c 1031     		adds	r1, r1, #16
+  54:services/crypto/rng.c ****     }
+ 277              		.loc 1 54 24 view .LVU64
+ 278 004e 515C     		ldrb	r1, [r2, r1]
+  54:services/crypto/rng.c ****     }
+ 279              		.loc 1 54 18 view .LVU65
+ 280 0050 054A     		ldr	r2, .L22
+ 281 0052 D154     		strb	r1, [r2, r3]
+  51:services/crypto/rng.c ****     {
+ 282              		.loc 1 51 36 is_stmt 1 discriminator 3 view .LVU66
+ 283 0054 0133     		adds	r3, r3, #1
+ 284              	.LVL23:
+  51:services/crypto/rng.c ****     {
+ 285              		.loc 1 51 36 is_stmt 0 discriminator 3 view .LVU67
+ 286 0056 DBB2     		uxtb	r3, r3
+ 287              	.LVL24:
+ 288              	.L19:
+  51:services/crypto/rng.c ****     {
+ 289              		.loc 1 51 28 is_stmt 1 discriminator 1 view .LVU68
+ 290 0058 0F2B     		cmp	r3, #15
+ 291 005a F2D9     		bls	.L20
+ 292              	.LBE5:
+  56:services/crypto/rng.c **** }
+ 293              		.loc 1 56 5 view .LVU69
+ 294 005c 2021     		movs	r1, #32
+ 295 005e 6846     		mov	r0, sp
+ 296 0060 FFF7FEFF 		bl	wipe
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 8
+
+
+ 297              	.LVL25:
+  57:services/crypto/rng.c **** 
+ 298              		.loc 1 57 1 is_stmt 0 view .LVU70
+ 299 0064 09B0     		add	sp, sp, #36
+ 300              		@ sp needed
+ 301              	.LVL26:
+ 302              	.LVL27:
+  57:services/crypto/rng.c **** 
+ 303              		.loc 1 57 1 view .LVU71
+ 304 0066 30BD     		pop	{r4, r5, pc}
+ 305              	.L23:
+ 306              		.align	2
+ 307              	.L22:
+ 308 0068 00000000 		.word	s_v
+ 309 006c 00000000 		.word	s_key
+ 310              		.cfi_endproc
+ 311              	.LFE2:
+ 313              		.section	.text.rng_zeroize,"ax",%progbits
+ 314              		.align	1
+ 315              		.global	rng_zeroize
+ 316              		.syntax unified
+ 317              		.code	16
+ 318              		.thumb_func
+ 320              	rng_zeroize:
+ 321              	.LFB4:
+  66:services/crypto/rng.c **** 
+  67:services/crypto/rng.c **** void rng_zeroize(void)
+  68:services/crypto/rng.c **** {
+ 322              		.loc 1 68 1 is_stmt 1 view -0
+ 323              		.cfi_startproc
+ 324              		@ args = 0, pretend = 0, frame = 0
+ 325              		@ frame_needed = 0, uses_anonymous_args = 0
+ 326 0000 10B5     		push	{r4, lr}
+ 327              	.LCFI3:
+ 328              		.cfi_def_cfa_offset 8
+ 329              		.cfi_offset 4, -8
+ 330              		.cfi_offset 14, -4
+  69:services/crypto/rng.c ****     wipe(s_key, 16u);
+ 331              		.loc 1 69 5 view .LVU73
+ 332 0002 0748     		ldr	r0, .L25
+ 333 0004 1021     		movs	r1, #16
+ 334 0006 FFF7FEFF 		bl	wipe
+ 335              	.LVL28:
+  70:services/crypto/rng.c ****     wipe(s_v, 16u);
+ 336              		.loc 1 70 5 view .LVU74
+ 337 000a 0648     		ldr	r0, .L25+4
+ 338 000c 1021     		movs	r1, #16
+ 339 000e FFF7FEFF 		bl	wipe
+ 340              	.LVL29:
+  71:services/crypto/rng.c ****     s_inst  = 0u;
+ 341              		.loc 1 71 5 view .LVU75
+ 342              		.loc 1 71 13 is_stmt 0 view .LVU76
+ 343 0012 054B     		ldr	r3, .L25+8
+ 344 0014 0022     		movs	r2, #0
+ 345 0016 1A70     		strb	r2, [r3]
+  72:services/crypto/rng.c ****     s_fault = 1u;        /* stay dead until rng_init() is called from INIT */
+ 346              		.loc 1 72 5 is_stmt 1 view .LVU77
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 9
+
+
+ 347              		.loc 1 72 13 is_stmt 0 view .LVU78
+ 348 0018 044B     		ldr	r3, .L25+12
+ 349 001a 0132     		adds	r2, r2, #1
+ 350 001c 1A70     		strb	r2, [r3]
+  73:services/crypto/rng.c **** }
+ 351              		.loc 1 73 1 view .LVU79
+ 352              		@ sp needed
+ 353 001e 10BD     		pop	{r4, pc}
+ 354              	.L26:
+ 355              		.align	2
+ 356              	.L25:
+ 357 0020 00000000 		.word	s_key
+ 358 0024 00000000 		.word	s_v
+ 359 0028 00000000 		.word	s_inst
+ 360 002c 00000000 		.word	s_fault
+ 361              		.cfi_endproc
+ 362              	.LFE4:
+ 364              		.section	.text.rng_init,"ax",%progbits
+ 365              		.align	1
+ 366              		.global	rng_init
+ 367              		.syntax unified
+ 368              		.code	16
+ 369              		.thumb_func
+ 371              	rng_init:
+ 372              	.LFB5:
+  74:services/crypto/rng.c **** 
+  75:services/crypto/rng.c **** int rng_init(void)
+  76:services/crypto/rng.c **** {
+ 373              		.loc 1 76 1 is_stmt 1 view -0
+ 374              		.cfi_startproc
+ 375              		@ args = 0, pretend = 0, frame = 32
+ 376              		@ frame_needed = 0, uses_anonymous_args = 0
+ 377 0000 00B5     		push	{lr}
+ 378              	.LCFI4:
+ 379              		.cfi_def_cfa_offset 4
+ 380              		.cfi_offset 14, -4
+ 381 0002 89B0     		sub	sp, sp, #36
+ 382              	.LCFI5:
+ 383              		.cfi_def_cfa_offset 40
+  77:services/crypto/rng.c ****     uint8_t seed[RNG_SEEDLEN];
+ 384              		.loc 1 77 5 view .LVU81
+  78:services/crypto/rng.c **** 
+  79:services/crypto/rng.c ****     s_inst  = 0u;
+ 385              		.loc 1 79 5 view .LVU82
+ 386              		.loc 1 79 13 is_stmt 0 view .LVU83
+ 387 0004 184B     		ldr	r3, .L33
+ 388 0006 0022     		movs	r2, #0
+ 389 0008 1A70     		strb	r2, [r3]
+  80:services/crypto/rng.c ****     s_fault = 0u;
+ 390              		.loc 1 80 5 is_stmt 1 view .LVU84
+ 391              		.loc 1 80 13 is_stmt 0 view .LVU85
+ 392 000a 184B     		ldr	r3, .L33+4
+ 393 000c 1A70     		strb	r2, [r3]
+  81:services/crypto/rng.c ****     wipe(s_key, 16u);                            /* Key = 0, V = 0 per 90A instantiate */
+ 394              		.loc 1 81 5 is_stmt 1 view .LVU86
+ 395 000e 1848     		ldr	r0, .L33+8
+ 396 0010 1021     		movs	r1, #16
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 10
+
+
+ 397 0012 FFF7FEFF 		bl	wipe
+ 398              	.LVL30:
+  82:services/crypto/rng.c ****     wipe(s_v, 16u);
+ 399              		.loc 1 82 5 view .LVU87
+ 400 0016 1748     		ldr	r0, .L33+12
+ 401 0018 1021     		movs	r1, #16
+ 402 001a FFF7FEFF 		bl	wipe
+ 403              	.LVL31:
+  83:services/crypto/rng.c **** 
+  84:services/crypto/rng.c ****     if (jitter_rng_init() != JITTER_OK)
+ 404              		.loc 1 84 5 view .LVU88
+ 405              		.loc 1 84 9 is_stmt 0 view .LVU89
+ 406 001e FFF7FEFF 		bl	jitter_rng_init
+ 407              	.LVL32:
+ 408              		.loc 1 84 8 discriminator 1 view .LVU90
+ 409 0022 0028     		cmp	r0, #0
+ 410 0024 14D1     		bne	.L31
+  85:services/crypto/rng.c ****     {
+  86:services/crypto/rng.c ****         latch_fault();
+  87:services/crypto/rng.c ****         return RNG_ERR_SOURCE;
+  88:services/crypto/rng.c ****     }
+  89:services/crypto/rng.c ****     if (jitter_rng_fill(seed, RNG_SEEDLEN) != JITTER_OK)
+ 411              		.loc 1 89 5 is_stmt 1 view .LVU91
+ 412              		.loc 1 89 9 is_stmt 0 view .LVU92
+ 413 0026 2021     		movs	r1, #32
+ 414 0028 6846     		mov	r0, sp
+ 415 002a FFF7FEFF 		bl	jitter_rng_fill
+ 416              	.LVL33:
+ 417              		.loc 1 89 8 discriminator 1 view .LVU93
+ 418 002e 0028     		cmp	r0, #0
+ 419 0030 12D1     		bne	.L32
+  90:services/crypto/rng.c ****     {
+  91:services/crypto/rng.c ****         wipe(seed, RNG_SEEDLEN);
+  92:services/crypto/rng.c ****         latch_fault();
+  93:services/crypto/rng.c ****         return RNG_ERR_SOURCE;
+  94:services/crypto/rng.c ****     }
+  95:services/crypto/rng.c **** 
+  96:services/crypto/rng.c ****     drbg_update(seed);
+ 420              		.loc 1 96 5 is_stmt 1 view .LVU94
+ 421 0032 6846     		mov	r0, sp
+ 422 0034 FFF7FEFF 		bl	drbg_update
+ 423              	.LVL34:
+  97:services/crypto/rng.c ****     wipe(seed, RNG_SEEDLEN);
+ 424              		.loc 1 97 5 view .LVU95
+ 425 0038 2021     		movs	r1, #32
+ 426 003a 6846     		mov	r0, sp
+ 427 003c FFF7FEFF 		bl	wipe
+ 428              	.LVL35:
+  98:services/crypto/rng.c ****     s_reseed_ctr = 1u;
+ 429              		.loc 1 98 5 view .LVU96
+ 430              		.loc 1 98 18 is_stmt 0 view .LVU97
+ 431 0040 0D4B     		ldr	r3, .L33+16
+ 432 0042 0122     		movs	r2, #1
+ 433 0044 1A80     		strh	r2, [r3]
+  99:services/crypto/rng.c ****     s_inst = 1u;
+ 434              		.loc 1 99 5 is_stmt 1 view .LVU98
+ 435              		.loc 1 99 12 is_stmt 0 view .LVU99
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 11
+
+
+ 436 0046 084B     		ldr	r3, .L33
+ 437 0048 1A70     		strb	r2, [r3]
+ 100:services/crypto/rng.c ****     return RNG_OK;
+ 438              		.loc 1 100 5 is_stmt 1 view .LVU100
+ 439              		.loc 1 100 12 is_stmt 0 view .LVU101
+ 440 004a 0020     		movs	r0, #0
+ 441              	.L27:
+ 101:services/crypto/rng.c **** }
+ 442              		.loc 1 101 1 view .LVU102
+ 443 004c 09B0     		add	sp, sp, #36
+ 444              		@ sp needed
+ 445 004e 00BD     		pop	{pc}
+ 446              	.L31:
+  86:services/crypto/rng.c ****         return RNG_ERR_SOURCE;
+ 447              		.loc 1 86 9 is_stmt 1 view .LVU103
+ 448 0050 FFF7FEFF 		bl	latch_fault
+ 449              	.LVL36:
+  87:services/crypto/rng.c ****     }
+ 450              		.loc 1 87 9 view .LVU104
+  87:services/crypto/rng.c ****     }
+ 451              		.loc 1 87 16 is_stmt 0 view .LVU105
+ 452 0054 0220     		movs	r0, #2
+ 453 0056 F9E7     		b	.L27
+ 454              	.L32:
+  91:services/crypto/rng.c ****         latch_fault();
+ 455              		.loc 1 91 9 is_stmt 1 view .LVU106
+ 456 0058 2021     		movs	r1, #32
+ 457 005a 6846     		mov	r0, sp
+ 458 005c FFF7FEFF 		bl	wipe
+ 459              	.LVL37:
+  92:services/crypto/rng.c ****         return RNG_ERR_SOURCE;
+ 460              		.loc 1 92 9 view .LVU107
+ 461 0060 FFF7FEFF 		bl	latch_fault
+ 462              	.LVL38:
+  93:services/crypto/rng.c ****     }
+ 463              		.loc 1 93 9 view .LVU108
+  93:services/crypto/rng.c ****     }
+ 464              		.loc 1 93 16 is_stmt 0 view .LVU109
+ 465 0064 0220     		movs	r0, #2
+ 466 0066 F1E7     		b	.L27
+ 467              	.L34:
+ 468              		.align	2
+ 469              	.L33:
+ 470 0068 00000000 		.word	s_inst
+ 471 006c 00000000 		.word	s_fault
+ 472 0070 00000000 		.word	s_key
+ 473 0074 00000000 		.word	s_v
+ 474 0078 00000000 		.word	s_reseed_ctr
+ 475              		.cfi_endproc
+ 476              	.LFE5:
+ 478              		.section	.text.rng_reseed,"ax",%progbits
+ 479              		.align	1
+ 480              		.global	rng_reseed
+ 481              		.syntax unified
+ 482              		.code	16
+ 483              		.thumb_func
+ 485              	rng_reseed:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 12
+
+
+ 486              	.LFB6:
+ 102:services/crypto/rng.c **** 
+ 103:services/crypto/rng.c **** int rng_reseed(void)
+ 104:services/crypto/rng.c **** {
+ 487              		.loc 1 104 1 is_stmt 1 view -0
+ 488              		.cfi_startproc
+ 489              		@ args = 0, pretend = 0, frame = 32
+ 490              		@ frame_needed = 0, uses_anonymous_args = 0
+ 491 0000 00B5     		push	{lr}
+ 492              	.LCFI6:
+ 493              		.cfi_def_cfa_offset 4
+ 494              		.cfi_offset 14, -4
+ 495 0002 89B0     		sub	sp, sp, #36
+ 496              	.LCFI7:
+ 497              		.cfi_def_cfa_offset 40
+ 105:services/crypto/rng.c ****     uint8_t seed[RNG_SEEDLEN];
+ 498              		.loc 1 105 5 view .LVU111
+ 106:services/crypto/rng.c **** 
+ 107:services/crypto/rng.c ****     if (s_fault != 0u)
+ 499              		.loc 1 107 5 view .LVU112
+ 500              		.loc 1 107 17 is_stmt 0 view .LVU113
+ 501 0004 134B     		ldr	r3, .L42
+ 502 0006 1B78     		ldrb	r3, [r3]
+ 503              		.loc 1 107 8 view .LVU114
+ 504 0008 002B     		cmp	r3, #0
+ 505 000a 21D1     		bne	.L39
+ 108:services/crypto/rng.c ****         return RNG_ERR_FAULT;
+ 109:services/crypto/rng.c ****     if (s_inst == 0u)
+ 506              		.loc 1 109 5 is_stmt 1 view .LVU115
+ 507              		.loc 1 109 16 is_stmt 0 view .LVU116
+ 508 000c 124B     		ldr	r3, .L42+4
+ 509 000e 1B78     		ldrb	r3, [r3]
+ 510              		.loc 1 109 8 view .LVU117
+ 511 0010 002B     		cmp	r3, #0
+ 512 0012 12D0     		beq	.L40
+ 110:services/crypto/rng.c ****         return rng_init();
+ 111:services/crypto/rng.c **** 
+ 112:services/crypto/rng.c ****     if (jitter_rng_fill(seed, RNG_SEEDLEN) != JITTER_OK)
+ 513              		.loc 1 112 5 is_stmt 1 view .LVU118
+ 514              		.loc 1 112 9 is_stmt 0 view .LVU119
+ 515 0014 2021     		movs	r1, #32
+ 516 0016 6846     		mov	r0, sp
+ 517 0018 FFF7FEFF 		bl	jitter_rng_fill
+ 518              	.LVL39:
+ 519              		.loc 1 112 8 discriminator 1 view .LVU120
+ 520 001c 0028     		cmp	r0, #0
+ 521 001e 0FD1     		bne	.L41
+ 113:services/crypto/rng.c ****     {
+ 114:services/crypto/rng.c ****         wipe(seed, RNG_SEEDLEN);
+ 115:services/crypto/rng.c ****         latch_fault();
+ 116:services/crypto/rng.c ****         return RNG_ERR_SOURCE;
+ 117:services/crypto/rng.c ****     }
+ 118:services/crypto/rng.c **** 
+ 119:services/crypto/rng.c ****     drbg_update(seed);                           /* seed_material = entropy_input */
+ 522              		.loc 1 119 5 is_stmt 1 view .LVU121
+ 523 0020 6846     		mov	r0, sp
+ 524 0022 FFF7FEFF 		bl	drbg_update
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 13
+
+
+ 525              	.LVL40:
+ 120:services/crypto/rng.c ****     wipe(seed, RNG_SEEDLEN);
+ 526              		.loc 1 120 5 view .LVU122
+ 527 0026 2021     		movs	r1, #32
+ 528 0028 6846     		mov	r0, sp
+ 529 002a FFF7FEFF 		bl	wipe
+ 530              	.LVL41:
+ 121:services/crypto/rng.c ****     s_reseed_ctr = 1u;
+ 531              		.loc 1 121 5 view .LVU123
+ 532              		.loc 1 121 18 is_stmt 0 view .LVU124
+ 533 002e 0B4B     		ldr	r3, .L42+8
+ 534 0030 0122     		movs	r2, #1
+ 535 0032 1A80     		strh	r2, [r3]
+ 122:services/crypto/rng.c ****     return RNG_OK;
+ 536              		.loc 1 122 5 is_stmt 1 view .LVU125
+ 537              		.loc 1 122 12 is_stmt 0 view .LVU126
+ 538 0034 0020     		movs	r0, #0
+ 539              	.L35:
+ 123:services/crypto/rng.c **** }
+ 540              		.loc 1 123 1 view .LVU127
+ 541 0036 09B0     		add	sp, sp, #36
+ 542              		@ sp needed
+ 543 0038 00BD     		pop	{pc}
+ 544              	.L40:
+ 110:services/crypto/rng.c **** 
+ 545              		.loc 1 110 9 is_stmt 1 view .LVU128
+ 110:services/crypto/rng.c **** 
+ 546              		.loc 1 110 16 is_stmt 0 view .LVU129
+ 547 003a FFF7FEFF 		bl	rng_init
+ 548              	.LVL42:
+ 549 003e FAE7     		b	.L35
+ 550              	.L41:
+ 114:services/crypto/rng.c ****         latch_fault();
+ 551              		.loc 1 114 9 is_stmt 1 view .LVU130
+ 552 0040 2021     		movs	r1, #32
+ 553 0042 6846     		mov	r0, sp
+ 554 0044 FFF7FEFF 		bl	wipe
+ 555              	.LVL43:
+ 115:services/crypto/rng.c ****         return RNG_ERR_SOURCE;
+ 556              		.loc 1 115 9 view .LVU131
+ 557 0048 FFF7FEFF 		bl	latch_fault
+ 558              	.LVL44:
+ 116:services/crypto/rng.c ****     }
+ 559              		.loc 1 116 9 view .LVU132
+ 116:services/crypto/rng.c ****     }
+ 560              		.loc 1 116 16 is_stmt 0 view .LVU133
+ 561 004c 0220     		movs	r0, #2
+ 562 004e F2E7     		b	.L35
+ 563              	.L39:
+ 108:services/crypto/rng.c ****     if (s_inst == 0u)
+ 564              		.loc 1 108 16 view .LVU134
+ 565 0050 0320     		movs	r0, #3
+ 566 0052 F0E7     		b	.L35
+ 567              	.L43:
+ 568              		.align	2
+ 569              	.L42:
+ 570 0054 00000000 		.word	s_fault
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 14
+
+
+ 571 0058 00000000 		.word	s_inst
+ 572 005c 00000000 		.word	s_reseed_ctr
+ 573              		.cfi_endproc
+ 574              	.LFE6:
+ 576              		.section	.text.rng_bytes,"ax",%progbits
+ 577              		.align	1
+ 578              		.global	rng_bytes
+ 579              		.syntax unified
+ 580              		.code	16
+ 581              		.thumb_func
+ 583              	rng_bytes:
+ 584              	.LVL45:
+ 585              	.LFB7:
+ 124:services/crypto/rng.c **** 
+ 125:services/crypto/rng.c **** int rng_bytes(uint8_t *out, uint16_t len)
+ 126:services/crypto/rng.c **** {
+ 586              		.loc 1 126 1 is_stmt 1 view -0
+ 587              		.cfi_startproc
+ 588              		@ args = 0, pretend = 0, frame = 24
+ 589              		@ frame_needed = 0, uses_anonymous_args = 0
+ 590              		.loc 1 126 1 is_stmt 0 view .LVU136
+ 591 0000 F0B5     		push	{r4, r5, r6, r7, lr}
+ 592              	.LCFI8:
+ 593              		.cfi_def_cfa_offset 20
+ 594              		.cfi_offset 4, -20
+ 595              		.cfi_offset 5, -16
+ 596              		.cfi_offset 6, -12
+ 597              		.cfi_offset 7, -8
+ 598              		.cfi_offset 14, -4
+ 599 0002 87B0     		sub	sp, sp, #28
+ 600              	.LCFI9:
+ 601              		.cfi_def_cfa_offset 48
+ 602 0004 0600     		movs	r6, r0
+ 603 0006 0F1E     		subs	r7, r1, #0
+ 127:services/crypto/rng.c ****     uint8_t  blk[16];
+ 604              		.loc 1 127 5 is_stmt 1 view .LVU137
+ 128:services/crypto/rng.c ****     uint16_t off = 0u;
+ 605              		.loc 1 128 5 view .LVU138
+ 606              	.LVL46:
+ 129:services/crypto/rng.c ****     int      r;
+ 607              		.loc 1 129 5 view .LVU139
+ 130:services/crypto/rng.c **** 
+ 131:services/crypto/rng.c ****     if (len == 0u)
+ 608              		.loc 1 131 5 view .LVU140
+ 609              		.loc 1 131 8 is_stmt 0 view .LVU141
+ 610 0008 4ED0     		beq	.L56
+ 132:services/crypto/rng.c ****         return RNG_OK;
+ 133:services/crypto/rng.c ****     if (out == 0)
+ 611              		.loc 1 133 5 is_stmt 1 view .LVU142
+ 612              		.loc 1 133 8 is_stmt 0 view .LVU143
+ 613 000a 0028     		cmp	r0, #0
+ 614 000c 4FD0     		beq	.L57
+ 134:services/crypto/rng.c ****         return RNG_ERR_PARAM;
+ 135:services/crypto/rng.c **** 
+ 136:services/crypto/rng.c ****     if (s_fault != 0u)
+ 615              		.loc 1 136 5 is_stmt 1 view .LVU144
+ 616              		.loc 1 136 17 is_stmt 0 view .LVU145
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 15
+
+
+ 617 000e 294B     		ldr	r3, .L63
+ 618 0010 1B78     		ldrb	r3, [r3]
+ 619 0012 0193     		str	r3, [sp, #4]
+ 620              		.loc 1 136 8 view .LVU146
+ 621 0014 002B     		cmp	r3, #0
+ 622 0016 3CD1     		bne	.L58
+ 137:services/crypto/rng.c ****     {
+ 138:services/crypto/rng.c ****         r = RNG_ERR_FAULT;
+ 139:services/crypto/rng.c ****         goto fail;
+ 140:services/crypto/rng.c ****     }
+ 141:services/crypto/rng.c ****     if (s_inst == 0u)                            /* lazy first use */
+ 623              		.loc 1 141 5 is_stmt 1 view .LVU147
+ 624              		.loc 1 141 16 is_stmt 0 view .LVU148
+ 625 0018 274B     		ldr	r3, .L63+4
+ 626 001a 1B78     		ldrb	r3, [r3]
+ 627              		.loc 1 141 8 view .LVU149
+ 628 001c 002B     		cmp	r3, #0
+ 629 001e 07D0     		beq	.L60
+ 630              	.LVL47:
+ 631              	.L47:
+ 142:services/crypto/rng.c ****     {
+ 143:services/crypto/rng.c ****         r = rng_init();
+ 144:services/crypto/rng.c ****         if (r != RNG_OK)
+ 145:services/crypto/rng.c ****             goto fail;
+ 146:services/crypto/rng.c ****     }
+ 147:services/crypto/rng.c ****     if (s_reseed_ctr > RNG_RESEED_INTERVAL)
+ 632              		.loc 1 147 5 is_stmt 1 view .LVU150
+ 633              		.loc 1 147 22 is_stmt 0 view .LVU151
+ 634 0020 264B     		ldr	r3, .L63+8
+ 635 0022 1A88     		ldrh	r2, [r3]
+ 636              		.loc 1 147 8 view .LVU152
+ 637 0024 8023     		movs	r3, #128
+ 638 0026 5B00     		lsls	r3, r3, #1
+ 639 0028 9A42     		cmp	r2, r3
+ 640 002a 06D8     		bhi	.L61
+ 641              	.L48:
+ 642              	.LBB6:
+ 643              	.LBB7:
+ 148:services/crypto/rng.c ****     {
+ 149:services/crypto/rng.c ****         r = rng_reseed();
+ 150:services/crypto/rng.c ****         if (r != RNG_OK)
+ 151:services/crypto/rng.c ****             goto fail;
+ 152:services/crypto/rng.c ****     }
+ 153:services/crypto/rng.c **** 
+ 154:services/crypto/rng.c ****     /* Generate (90A 10.2.1.5.1). len <= 65535 B < 2^19 bits, the per-request limit. */
+ 155:services/crypto/rng.c ****     while (off < len)
+ 156:services/crypto/rng.c ****     {
+ 157:services/crypto/rng.c ****         uint16_t n = (uint16_t)(len - off);
+ 158:services/crypto/rng.c ****         if (n > 16u)
+ 159:services/crypto/rng.c ****             n = 16u;
+ 160:services/crypto/rng.c ****         v_inc();
+ 161:services/crypto/rng.c ****         aes128_encrypt_block(s_key, s_v, blk);
+ 162:services/crypto/rng.c ****         for (uint8_t j = 0u; j < n; j++)
+ 644              		.loc 1 162 22 view .LVU153
+ 645 002c 0025     		movs	r5, #0
+ 646 002e 13E0     		b	.L52
+ 647              	.LVL48:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 16
+
+
+ 648              	.L60:
+ 649              		.loc 1 162 22 view .LVU154
+ 650              	.LBE7:
+ 651              	.LBE6:
+ 143:services/crypto/rng.c ****         if (r != RNG_OK)
+ 652              		.loc 1 143 9 is_stmt 1 view .LVU155
+ 143:services/crypto/rng.c ****         if (r != RNG_OK)
+ 653              		.loc 1 143 13 is_stmt 0 view .LVU156
+ 654 0030 FFF7FEFF 		bl	rng_init
+ 655              	.LVL49:
+ 144:services/crypto/rng.c ****             goto fail;
+ 656              		.loc 1 144 9 is_stmt 1 view .LVU157
+ 144:services/crypto/rng.c ****             goto fail;
+ 657              		.loc 1 144 12 is_stmt 0 view .LVU158
+ 658 0034 0028     		cmp	r0, #0
+ 659 0036 F3D0     		beq	.L47
+ 660 0038 2CE0     		b	.L46
+ 661              	.LVL50:
+ 662              	.L61:
+ 149:services/crypto/rng.c ****         if (r != RNG_OK)
+ 663              		.loc 1 149 9 is_stmt 1 view .LVU159
+ 149:services/crypto/rng.c ****         if (r != RNG_OK)
+ 664              		.loc 1 149 13 is_stmt 0 view .LVU160
+ 665 003a FFF7FEFF 		bl	rng_reseed
+ 666              	.LVL51:
+ 150:services/crypto/rng.c ****             goto fail;
+ 667              		.loc 1 150 9 is_stmt 1 view .LVU161
+ 150:services/crypto/rng.c ****             goto fail;
+ 668              		.loc 1 150 12 is_stmt 0 view .LVU162
+ 669 003e 0028     		cmp	r0, #0
+ 670 0040 F4D0     		beq	.L48
+ 671 0042 27E0     		b	.L46
+ 672              	.LVL52:
+ 673              	.L51:
+ 674              	.LBB10:
+ 675              	.LBB8:
+ 163:services/crypto/rng.c ****             out[off + j] = blk[j];
+ 676              		.loc 1 163 13 is_stmt 1 view .LVU163
+ 677              		.loc 1 163 21 is_stmt 0 view .LVU164
+ 678 0044 EA18     		adds	r2, r5, r3
+ 679              		.loc 1 163 31 view .LVU165
+ 680 0046 02A9     		add	r1, sp, #8
+ 681 0048 C95C     		ldrb	r1, [r1, r3]
+ 682              		.loc 1 163 26 view .LVU166
+ 683 004a B154     		strb	r1, [r6, r2]
+ 162:services/crypto/rng.c ****             out[off + j] = blk[j];
+ 684              		.loc 1 162 38 is_stmt 1 discriminator 3 view .LVU167
+ 685 004c 0133     		adds	r3, r3, #1
+ 686              	.LVL53:
+ 162:services/crypto/rng.c ****             out[off + j] = blk[j];
+ 687              		.loc 1 162 38 is_stmt 0 discriminator 3 view .LVU168
+ 688 004e DBB2     		uxtb	r3, r3
+ 689              	.LVL54:
+ 690              	.L50:
+ 162:services/crypto/rng.c ****             out[off + j] = blk[j];
+ 691              		.loc 1 162 32 is_stmt 1 discriminator 1 view .LVU169
+ 692 0050 A342     		cmp	r3, r4
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 17
+
+
+ 693 0052 F7D3     		bcc	.L51
+ 694              	.LBE8:
+ 164:services/crypto/rng.c ****         off = (uint16_t)(off + n);
+ 695              		.loc 1 164 9 view .LVU170
+ 696              		.loc 1 164 13 is_stmt 0 view .LVU171
+ 697 0054 2D19     		adds	r5, r5, r4
+ 698              	.LVL55:
+ 699              		.loc 1 164 13 view .LVU172
+ 700 0056 ADB2     		uxth	r5, r5
+ 701              	.LVL56:
+ 702              	.L52:
+ 703              		.loc 1 164 13 view .LVU173
+ 704              	.LBE10:
+ 155:services/crypto/rng.c ****     {
+ 705              		.loc 1 155 16 is_stmt 1 view .LVU174
+ 706 0058 BD42     		cmp	r5, r7
+ 707 005a 0DD2     		bcs	.L62
+ 708              	.LBB11:
+ 157:services/crypto/rng.c ****         if (n > 16u)
+ 709              		.loc 1 157 9 view .LVU175
+ 157:services/crypto/rng.c ****         if (n > 16u)
+ 710              		.loc 1 157 18 is_stmt 0 view .LVU176
+ 711 005c 7C1B     		subs	r4, r7, r5
+ 712 005e A4B2     		uxth	r4, r4
+ 713              	.LVL57:
+ 158:services/crypto/rng.c ****             n = 16u;
+ 714              		.loc 1 158 9 is_stmt 1 view .LVU177
+ 158:services/crypto/rng.c ****             n = 16u;
+ 715              		.loc 1 158 12 is_stmt 0 view .LVU178
+ 716 0060 102C     		cmp	r4, #16
+ 717 0062 00D9     		bls	.L49
+ 159:services/crypto/rng.c ****         v_inc();
+ 718              		.loc 1 159 15 view .LVU179
+ 719 0064 1024     		movs	r4, #16
+ 720              	.LVL58:
+ 721              	.L49:
+ 160:services/crypto/rng.c ****         aes128_encrypt_block(s_key, s_v, blk);
+ 722              		.loc 1 160 9 is_stmt 1 view .LVU180
+ 723 0066 FFF7FEFF 		bl	v_inc
+ 724              	.LVL59:
+ 161:services/crypto/rng.c ****         for (uint8_t j = 0u; j < n; j++)
+ 725              		.loc 1 161 9 view .LVU181
+ 726 006a 1549     		ldr	r1, .L63+12
+ 727 006c 1548     		ldr	r0, .L63+16
+ 728 006e 02AA     		add	r2, sp, #8
+ 729 0070 FFF7FEFF 		bl	aes128_encrypt_block
+ 730              	.LVL60:
+ 162:services/crypto/rng.c ****             out[off + j] = blk[j];
+ 731              		.loc 1 162 9 view .LVU182
+ 732              	.LBB9:
+ 162:services/crypto/rng.c ****             out[off + j] = blk[j];
+ 733              		.loc 1 162 14 view .LVU183
+ 162:services/crypto/rng.c ****             out[off + j] = blk[j];
+ 734              		.loc 1 162 22 is_stmt 0 view .LVU184
+ 735 0074 019B     		ldr	r3, [sp, #4]
+ 162:services/crypto/rng.c ****             out[off + j] = blk[j];
+ 736              		.loc 1 162 9 view .LVU185
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 18
+
+
+ 737 0076 EBE7     		b	.L50
+ 738              	.LVL61:
+ 739              	.L62:
+ 162:services/crypto/rng.c ****             out[off + j] = blk[j];
+ 740              		.loc 1 162 9 view .LVU186
+ 741              	.LBE9:
+ 742              	.LBE11:
+ 165:services/crypto/rng.c ****     }
+ 166:services/crypto/rng.c ****     wipe(blk, 16u);
+ 743              		.loc 1 166 5 is_stmt 1 view .LVU187
+ 744 0078 1021     		movs	r1, #16
+ 745 007a 02A8     		add	r0, sp, #8
+ 746 007c FFF7FEFF 		bl	wipe
+ 747              	.LVL62:
+ 167:services/crypto/rng.c **** 
+ 168:services/crypto/rng.c ****     drbg_update(0);                              /* backtracking resistance */
+ 748              		.loc 1 168 5 view .LVU188
+ 749 0080 0020     		movs	r0, #0
+ 750 0082 FFF7FEFF 		bl	drbg_update
+ 751              	.LVL63:
+ 169:services/crypto/rng.c ****     s_reseed_ctr++;
+ 752              		.loc 1 169 5 view .LVU189
+ 753              		.loc 1 169 17 is_stmt 0 view .LVU190
+ 754 0086 0D4A     		ldr	r2, .L63+8
+ 755 0088 1388     		ldrh	r3, [r2]
+ 756 008a 0133     		adds	r3, r3, #1
+ 757 008c 1380     		strh	r3, [r2]
+ 170:services/crypto/rng.c ****     return RNG_OK;
+ 758              		.loc 1 170 5 is_stmt 1 view .LVU191
+ 759              		.loc 1 170 12 is_stmt 0 view .LVU192
+ 760 008e 0020     		movs	r0, #0
+ 761 0090 0BE0     		b	.L44
+ 762              	.LVL64:
+ 763              	.L58:
+ 138:services/crypto/rng.c ****         goto fail;
+ 764              		.loc 1 138 11 view .LVU193
+ 765 0092 0320     		movs	r0, #3
+ 766              	.LVL65:
+ 767              	.L46:
+ 171:services/crypto/rng.c **** 
+ 172:services/crypto/rng.c **** fail:
+ 173:services/crypto/rng.c ****     for (uint16_t i = 0u; i < len; i++)
+ 768              		.loc 1 173 5 is_stmt 1 view .LVU194
+ 769              	.LBB12:
+ 770              		.loc 1 173 10 view .LVU195
+ 771              		.loc 1 173 19 is_stmt 0 view .LVU196
+ 772 0094 0023     		movs	r3, #0
+ 773              		.loc 1 173 5 view .LVU197
+ 774 0096 04E0     		b	.L54
+ 775              	.LVL66:
+ 776              	.L55:
+ 174:services/crypto/rng.c ****         out[i] = 0u;
+ 777              		.loc 1 174 9 is_stmt 1 view .LVU198
+ 778              		.loc 1 174 12 is_stmt 0 view .LVU199
+ 779 0098 F218     		adds	r2, r6, r3
+ 780              		.loc 1 174 16 view .LVU200
+ 781 009a 0021     		movs	r1, #0
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 19
+
+
+ 782 009c 1170     		strb	r1, [r2]
+ 173:services/crypto/rng.c ****         out[i] = 0u;
+ 783              		.loc 1 173 37 is_stmt 1 discriminator 3 view .LVU201
+ 784 009e 0133     		adds	r3, r3, #1
+ 785              	.LVL67:
+ 173:services/crypto/rng.c ****         out[i] = 0u;
+ 786              		.loc 1 173 37 is_stmt 0 discriminator 3 view .LVU202
+ 787 00a0 9BB2     		uxth	r3, r3
+ 788              	.LVL68:
+ 789              	.L54:
+ 173:services/crypto/rng.c ****         out[i] = 0u;
+ 790              		.loc 1 173 29 is_stmt 1 discriminator 1 view .LVU203
+ 791 00a2 BB42     		cmp	r3, r7
+ 792 00a4 F8D3     		bcc	.L55
+ 793 00a6 00E0     		b	.L44
+ 794              	.LVL69:
+ 795              	.L56:
+ 173:services/crypto/rng.c ****         out[i] = 0u;
+ 796              		.loc 1 173 29 is_stmt 0 discriminator 1 view .LVU204
+ 797              	.LBE12:
+ 132:services/crypto/rng.c ****     if (out == 0)
+ 798              		.loc 1 132 16 view .LVU205
+ 799 00a8 0020     		movs	r0, #0
+ 800              	.LVL70:
+ 801              	.L44:
+ 175:services/crypto/rng.c ****     return r;
+ 176:services/crypto/rng.c **** }...
+ 802              		.loc 1 176 1 view .LVU206
+ 803 00aa 07B0     		add	sp, sp, #28
+ 804              		@ sp needed
+ 805              	.LVL71:
+ 806              	.LVL72:
+ 807              		.loc 1 176 1 view .LVU207
+ 808 00ac F0BD     		pop	{r4, r5, r6, r7, pc}
+ 809              	.LVL73:
+ 810              	.L57:
+ 134:services/crypto/rng.c ****         return RNG_ERR_PARAM;
+ 811              		.loc 1 134 16 view .LVU208
+ 812 00ae 0120     		movs	r0, #1
+ 813              	.LVL74:
+ 134:services/crypto/rng.c ****         return RNG_ERR_PARAM;
+ 814              		.loc 1 134 16 view .LVU209
+ 815 00b0 FBE7     		b	.L44
+ 816              	.L64:
+ 817 00b2 C046     		.align	2
+ 818              	.L63:
+ 819 00b4 00000000 		.word	s_fault
+ 820 00b8 00000000 		.word	s_inst
+ 821 00bc 00000000 		.word	s_reseed_ctr
+ 822 00c0 00000000 		.word	s_v
+ 823 00c4 00000000 		.word	s_key
+ 824              		.cfi_endproc
+ 825              	.LFE7:
+ 827              		.section	.bss.s_fault,"aw",%nobits
+ 830              	s_fault:
+ 831 0000 00       		.space	1
+ 832              		.section	.bss.s_inst,"aw",%nobits
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 20
+
+
+ 835              	s_inst:
+ 836 0000 00       		.space	1
+ 837              		.section	.bss.s_reseed_ctr,"aw",%nobits
+ 838              		.align	1
+ 841              	s_reseed_ctr:
+ 842 0000 0000     		.space	2
+ 843              		.section	.bss.s_v,"aw",%nobits
+ 844              		.align	2
+ 847              	s_v:
+ 848 0000 00000000 		.space	16
+ 848      00000000 
+ 848      00000000 
+ 848      00000000 
+ 849              		.section	.bss.s_key,"aw",%nobits
+ 850              		.align	2
+ 853              	s_key:
+ 854 0000 00000000 		.space	16
+ 854      00000000 
+ 854      00000000 
+ 854      00000000 
+ 855              		.text
+ 856              	.Letext0:
+ 857              		.file 2 "/Applications/ArmGNUToolchain/15.3.rel1/arm-none-eabi/arm-none-eabi/include/machine/_defa
+ 858              		.file 3 "/Applications/ArmGNUToolchain/15.3.rel1/arm-none-eabi/arm-none-eabi/include/sys/_stdint.h
+ 859              		.file 4 "services/crypto/../../Core/Inc/aes.h"
+ 860              		.file 5 "services/crypto/jitter_rng.h"
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s 			page 21
+
+
+DEFINED SYMBOLS
+                            *ABS*:00000000 rng.c
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:19     .text.wipe:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:24     .text.wipe:00000000 wipe
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:62     .text.v_inc:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:67     .text.v_inc:00000000 v_inc
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:114    .text.v_inc:0000001c $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:847    .bss.s_v:00000000 s_v
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:119    .text.latch_fault:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:124    .text.latch_fault:00000000 latch_fault
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:161    .text.latch_fault:00000020 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:830    .bss.s_fault:00000000 s_fault
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:835    .bss.s_inst:00000000 s_inst
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:853    .bss.s_key:00000000 s_key
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:169    .text.drbg_update:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:174    .text.drbg_update:00000000 drbg_update
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:308    .text.drbg_update:00000068 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:314    .text.rng_zeroize:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:320    .text.rng_zeroize:00000000 rng_zeroize
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:357    .text.rng_zeroize:00000020 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:365    .text.rng_init:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:371    .text.rng_init:00000000 rng_init
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:470    .text.rng_init:00000068 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:841    .bss.s_reseed_ctr:00000000 s_reseed_ctr
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:479    .text.rng_reseed:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:485    .text.rng_reseed:00000000 rng_reseed
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:570    .text.rng_reseed:00000054 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:577    .text.rng_bytes:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:583    .text.rng_bytes:00000000 rng_bytes
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:819    .text.rng_bytes:000000b4 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:831    .bss.s_fault:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:836    .bss.s_inst:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:838    .bss.s_reseed_ctr:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:844    .bss.s_v:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccMNQbyn.s:850    .bss.s_key:00000000 $d
+
+UNDEFINED SYMBOLS
+aes128_encrypt_block
+jitter_rng_init
+jitter_rng_fill

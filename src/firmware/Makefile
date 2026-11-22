@@ -46,6 +46,9 @@ services/crypto/confirm.c \
 services/crypto/aes_gcm.c \
 services/crypto/jitter_rng.c \
 services/crypto/rng.c \
+services/crypto/x25519.c \
+services/crypto/kdf.c \
+Core/Src/aes.c \
 Drivers/lora_driver/lora.c \
 Drivers/timing/timing.c \
 Drivers/led/led.c \

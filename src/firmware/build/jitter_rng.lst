@@ -1,0 +1,2363 @@
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 1
+
+
+   1              		.cpu cortex-m0
+   2              		.arch armv6s-m
+   3              		.fpu softvfp
+   4              		.eabi_attribute 20, 1
+   5              		.eabi_attribute 21, 1
+   6              		.eabi_attribute 23, 3
+   7              		.eabi_attribute 24, 1
+   8              		.eabi_attribute 25, 1
+   9              		.eabi_attribute 26, 1
+  10              		.eabi_attribute 30, 1
+  11              		.eabi_attribute 34, 0
+  12              		.eabi_attribute 18, 4
+  13              		.file	"jitter_rng.c"
+  14              		.text
+  15              	.Ltext0:
+  16              		.cfi_sections	.debug_frame
+  17              		.file 1 "services/crypto/jitter_rng.c"
+  18              		.section	.text.health_reset,"ax",%progbits
+  19              		.align	1
+  20              		.syntax unified
+  21              		.code	16
+  22              		.thumb_func
+  24              	health_reset:
+  25              	.LFB40:
+   1:services/crypto/jitter_rng.c **** #include "jitter_rng.h"
+   2:services/crypto/jitter_rng.c **** #include "stm32f0xx.h"
+   3:services/crypto/jitter_rng.c **** #include "../../Core/Inc/aes.h"     /* aes128_encrypt_block (conditioner) */
+   4:services/crypto/jitter_rng.c **** 
+   5:services/crypto/jitter_rng.c **** /*
+   6:services/crypto/jitter_rng.c ****  * jitter_rng.c: two-oscillator timing-jitter entropy source, STM32F042
+   7:services/crypto/jitter_rng.c ****  *
+   8:services/crypto/jitter_rng.c ****  * Two independent clocks
+   9:services/crypto/jitter_rng.c ****  * ----------------------
+  10:services/crypto/jitter_rng.c ****  *   Clock A: system clock, HSE crystal -> PLL -> 48 MHz (set up by clock_48mhz_init
+  11:services/crypto/jitter_rng.c ****  *            unless the PLL is already the system clock). Drives TIM14's counter.
+  12:services/crypto/jitter_rng.c ****  *   Clock B: LSI, the internal ~40 kHz RC oscillator. Routed to TIM14 channel 1
+  13:services/crypto/jitter_rng.c ****  *            through the RTC clock mux (RTCSEL = LSI) and TIM14_OR.TI1_RMP.
+  14:services/crypto/jitter_rng.c ****  *
+  15:services/crypto/jitter_rng.c ****  * Every rising LSI edge latches the TIM14 count into CCR1. The difference
+  16:services/crypto/jitter_rng.c ****  * between two captures is the number of 48 MHz ticks in one LSI period
+  17:services/crypto/jitter_rng.c ****  * (about 1200). The two oscillators have no phase relationship, so the low bits of
+  18:services/crypto/jitter_rng.c ****  * that difference move with LSI period jitter and wander.
+  19:services/crypto/jitter_rng.c ****  *
+  20:services/crypto/jitter_rng.c ****  * Caveat: if the LSI/HSE frequency ratio were perfectly stable, the low bits
+  21:services/crypto/jitter_rng.c ****  * would still follow a deterministic pattern (like a Bresenham line). Only the
+  22:services/crypto/jitter_rng.c ****  * real jitter perturbs it, which is why the entropy MUST be measured
+  23:services/crypto/jitter_rng.c ****  * (jitter_rng_raw + ea_non_iid) and why the assumed entropy below is low.
+  24:services/crypto/jitter_rng.c ****  *
+  25:services/crypto/jitter_rng.c ****  * Pipeline: capture -> delta -> low 2 bits -> health tests (RCT + APT)
+  26:services/crypto/jitter_rng.c ****  *           -> pack -> AES-CBC-MAC compression -> 16 output bytes.
+  27:services/crypto/jitter_rng.c ****  *
+  28:services/crypto/jitter_rng.c ****  * Startup: plausibility self-test, then SP 800-90B startup health tests
+  29:services/crypto/jitter_rng.c ****  *          (1024 samples through RCT + APT, no output).
+  30:services/crypto/jitter_rng.c ****  */
+  31:services/crypto/jitter_rng.c **** 
+  32:services/crypto/jitter_rng.c **** /* ---- configuration: replace the placeholders after measuring ---------- */
+  33:services/crypto/jitter_rng.c **** #define JITTER_ASSUMED_H          0.125   /* PLACEHOLDER: min-entropy, bits per 2-bit symbol   */
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 2
+
+
+  34:services/crypto/jitter_rng.c **** #define JITTER_SAMPLES_PER_BLOCK  4096u   /* 4096 x 0.125 = 512 bits in -> 128 bits out (4x)    */
+  35:services/crypto/jitter_rng.c **** #define JITTER_RCT_CUTOFF         161u    /* 1 + ceil(20 / H), alpha = 2^-20                    */
+  36:services/crypto/jitter_rng.c **** #define JITTER_APT_WINDOW         512u    /* SP 800-90B window for non-binary symbols           */
+  37:services/crypto/jitter_rng.c **** #define JITTER_APT_CUTOFF         497u    /* 1 + CRITBINOM(512, 2^-H, 1 - 2^-20)                */
+  38:services/crypto/jitter_rng.c **** #define JITTER_SYMBOL_MASK        0x03u   /* keep 2 bits per sample (packing below assumes 2)   */
+  39:services/crypto/jitter_rng.c **** #define JITTER_STARTUP_SAMPLES    1024u   /* SP 800-90B 4.3: startup test length                */
+  40:services/crypto/jitter_rng.c **** 
+  41:services/crypto/jitter_rng.c **** #define JITTER_CLK_SPINS          200000u /* timeout for HSE / PLL / switch waits               */
+  42:services/crypto/jitter_rng.c **** #define JITTER_PLL_MUL            RCC_CFGR_PLLMUL6   /* 8 MHz HSE x 6 = 48 MHz (Red Pill crystal) *
+  43:services/crypto/jitter_rng.c **** 
+  44:services/crypto/jitter_rng.c **** #define JITTER_TIMEOUT_SPINS      20000u  /* >> one LSI period (25 us ~ 200 loop passes)        */
+  45:services/crypto/jitter_rng.c **** #define JITTER_LSI_START_SPINS    100000u
+  46:services/crypto/jitter_rng.c **** #define JITTER_DELTA_MIN          400u    /* self-test window for the 48 MHz count per LSI      */
+  47:services/crypto/jitter_rng.c **** #define JITTER_DELTA_MAX          3200u   /* period (LSI 30..60 kHz is 800..1600)               */
+  48:services/crypto/jitter_rng.c **** 
+  49:services/crypto/jitter_rng.c **** typedef char jitter_cfg_check[((JITTER_SAMPLES_PER_BLOCK % 64u) == 0u) ? 1 : -1];
+  50:services/crypto/jitter_rng.c **** 
+  51:services/crypto/jitter_rng.c **** static const uint8_t k_cond_key[16] = {0};   /* fixed key for CBC-MAC compression */
+  52:services/crypto/jitter_rng.c **** 
+  53:services/crypto/jitter_rng.c **** /* ---- state ------------------------------------------------------------- */
+  54:services/crypto/jitter_rng.c **** static uint16_t s_prev;
+  55:services/crypto/jitter_rng.c **** static uint8_t  s_have_prev;
+  56:services/crypto/jitter_rng.c **** static uint8_t  s_ready;
+  57:services/crypto/jitter_rng.c **** static uint8_t  s_failed;            /* latched JITTER_ERR_* or 0 */
+  58:services/crypto/jitter_rng.c **** static uint8_t  s_rct_last;
+  59:services/crypto/jitter_rng.c **** static uint8_t  s_rct_cnt;
+  60:services/crypto/jitter_rng.c **** static uint8_t  s_apt_ref;
+  61:services/crypto/jitter_rng.c **** static uint16_t s_apt_cnt;
+  62:services/crypto/jitter_rng.c **** static uint16_t s_apt_pos;
+  63:services/crypto/jitter_rng.c **** 
+  64:services/crypto/jitter_rng.c **** static void health_reset(void)
+  65:services/crypto/jitter_rng.c **** {
+  26              		.loc 1 65 1 view -0
+  27              		.cfi_startproc
+  28              		@ args = 0, pretend = 0, frame = 0
+  29              		@ frame_needed = 0, uses_anonymous_args = 0
+  30              		@ link register save eliminated.
+  66:services/crypto/jitter_rng.c ****     s_rct_last = 0xFFu;      /* not a valid 2-bit symbol, so the first sample starts a run */
+  31              		.loc 1 66 5 view .LVU1
+  32              		.loc 1 66 16 is_stmt 0 view .LVU2
+  33 0000 064B     		ldr	r3, .L2
+  34 0002 FF22     		movs	r2, #255
+  35 0004 1A70     		strb	r2, [r3]
+  67:services/crypto/jitter_rng.c ****     s_rct_cnt  = 0u;
+  36              		.loc 1 67 5 is_stmt 1 view .LVU3
+  37              		.loc 1 67 16 is_stmt 0 view .LVU4
+  38 0006 064A     		ldr	r2, .L2+4
+  39 0008 0023     		movs	r3, #0
+  40 000a 1370     		strb	r3, [r2]
+  68:services/crypto/jitter_rng.c ****     s_apt_pos  = 0u;
+  41              		.loc 1 68 5 is_stmt 1 view .LVU5
+  42              		.loc 1 68 16 is_stmt 0 view .LVU6
+  43 000c 054A     		ldr	r2, .L2+8
+  44 000e 1380     		strh	r3, [r2]
+  69:services/crypto/jitter_rng.c ****     s_apt_cnt  = 0u;
+  45              		.loc 1 69 5 is_stmt 1 view .LVU7
+  46              		.loc 1 69 16 is_stmt 0 view .LVU8
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 3
+
+
+  47 0010 054A     		ldr	r2, .L2+12
+  48 0012 1380     		strh	r3, [r2]
+  70:services/crypto/jitter_rng.c ****     s_apt_ref  = 0u;
+  49              		.loc 1 70 5 is_stmt 1 view .LVU9
+  50              		.loc 1 70 16 is_stmt 0 view .LVU10
+  51 0014 054B     		ldr	r3, .L2+16
+  52 0016 0022     		movs	r2, #0
+  53 0018 1A70     		strb	r2, [r3]
+  71:services/crypto/jitter_rng.c **** }
+  54              		.loc 1 71 1 view .LVU11
+  55              		@ sp needed
+  56 001a 7047     		bx	lr
+  57              	.L3:
+  58              		.align	2
+  59              	.L2:
+  60 001c 00000000 		.word	s_rct_last
+  61 0020 00000000 		.word	s_rct_cnt
+  62 0024 00000000 		.word	s_apt_pos
+  63 0028 00000000 		.word	s_apt_cnt
+  64 002c 00000000 		.word	s_apt_ref
+  65              		.cfi_endproc
+  66              	.LFE40:
+  68              		.section	.text.wipe,"ax",%progbits
+  69              		.align	1
+  70              		.syntax unified
+  71              		.code	16
+  72              		.thumb_func
+  74              	wipe:
+  75              	.LVL0:
+  76              	.LFB41:
+  72:services/crypto/jitter_rng.c **** 
+  73:services/crypto/jitter_rng.c **** static void wipe(volatile uint8_t *p, uint8_t n)
+  74:services/crypto/jitter_rng.c **** {
+  77              		.loc 1 74 1 is_stmt 1 view -0
+  78              		.cfi_startproc
+  79              		@ args = 0, pretend = 0, frame = 0
+  80              		@ frame_needed = 0, uses_anonymous_args = 0
+  81              		@ link register save eliminated.
+  75:services/crypto/jitter_rng.c ****     while (n--)
+  82              		.loc 1 75 5 view .LVU13
+  83              		.loc 1 75 11 is_stmt 0 view .LVU14
+  84 0000 03E0     		b	.L5
+  85              	.LVL1:
+  86              	.L6:
+  76:services/crypto/jitter_rng.c ****         *p++ = 0u;
+  87              		.loc 1 76 9 is_stmt 1 view .LVU15
+  88              		.loc 1 76 14 is_stmt 0 view .LVU16
+  89 0002 0022     		movs	r2, #0
+  90 0004 0270     		strb	r2, [r0]
+  75:services/crypto/jitter_rng.c ****     while (n--)
+  91              		.loc 1 75 13 view .LVU17
+  92 0006 1900     		movs	r1, r3
+  93              		.loc 1 76 11 view .LVU18
+  94 0008 0130     		adds	r0, r0, #1
+  95              	.LVL2:
+  96              	.L5:
+  75:services/crypto/jitter_rng.c ****     while (n--)
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 4
+
+
+  97              		.loc 1 75 12 is_stmt 1 view .LVU19
+  75:services/crypto/jitter_rng.c ****     while (n--)
+  98              		.loc 1 75 13 is_stmt 0 view .LVU20
+  99 000a 4B1E     		subs	r3, r1, #1
+ 100 000c DBB2     		uxtb	r3, r3
+ 101              	.LVL3:
+  75:services/crypto/jitter_rng.c ****     while (n--)
+ 102              		.loc 1 75 12 view .LVU21
+ 103 000e 0029     		cmp	r1, #0
+ 104 0010 F7D1     		bne	.L6
+  77:services/crypto/jitter_rng.c **** }
+ 105              		.loc 1 77 1 view .LVU22
+ 106              		@ sp needed
+ 107 0012 7047     		bx	lr
+ 108              		.cfi_endproc
+ 109              	.LFE41:
+ 111              		.section	.text.next_delta,"ax",%progbits
+ 112              		.align	1
+ 113              		.syntax unified
+ 114              		.code	16
+ 115              		.thumb_func
+ 117              	next_delta:
+ 118              	.LFB42:
+  78:services/crypto/jitter_rng.c **** 
+  79:services/crypto/jitter_rng.c **** /* ---- capture: one LSI period measured in 48 MHz ticks ------------------ */
+  80:services/crypto/jitter_rng.c **** static uint8_t next_delta(uint16_t *delta)
+  81:services/crypto/jitter_rng.c **** {
+ 119              		.loc 1 81 1 is_stmt 1 view -0
+ 120              		.cfi_startproc
+ 121              		@ args = 0, pretend = 0, frame = 0
+ 122              		@ frame_needed = 0, uses_anonymous_args = 0
+ 123              		@ link register save eliminated.
+ 124              	.LVL4:
+ 125              	.L13:
+  82:services/crypto/jitter_rng.c ****     for (;;)
+ 126              		.loc 1 82 5 view .LVU24
+ 127              	.LBB2:
+  83:services/crypto/jitter_rng.c ****     {
+  84:services/crypto/jitter_rng.c ****         uint32_t spins = JITTER_TIMEOUT_SPINS;
+ 128              		.loc 1 84 9 view .LVU25
+  85:services/crypto/jitter_rng.c **** 
+  86:services/crypto/jitter_rng.c ****         while ((TIM14->SR & TIM_SR_CC1IF) == 0u)
+ 129              		.loc 1 86 9 view .LVU26
+  84:services/crypto/jitter_rng.c **** 
+ 130              		.loc 1 84 18 is_stmt 0 view .LVU27
+ 131 0000 144A     		ldr	r2, .L17
+ 132              	.LVL5:
+ 133              	.L8:
+ 134              		.loc 1 86 43 is_stmt 1 view .LVU28
+ 135              		.loc 1 86 22 is_stmt 0 view .LVU29
+ 136 0002 154B     		ldr	r3, .L17+4
+ 137 0004 1B69     		ldr	r3, [r3, #16]
+ 138              		.loc 1 86 43 view .LVU30
+ 139 0006 9B07     		lsls	r3, r3, #30
+ 140 0008 06D4     		bmi	.L15
+  87:services/crypto/jitter_rng.c ****         {
+  88:services/crypto/jitter_rng.c ****             if (--spins == 0u)
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 5
+
+
+ 141              		.loc 1 88 13 is_stmt 1 view .LVU31
+ 142              		.loc 1 88 16 is_stmt 0 view .LVU32
+ 143 000a 013A     		subs	r2, r2, #1
+ 144              	.LVL6:
+ 145              		.loc 1 88 16 view .LVU33
+ 146 000c 002A     		cmp	r2, #0
+ 147 000e F8D1     		bne	.L8
+  89:services/crypto/jitter_rng.c ****             {
+  90:services/crypto/jitter_rng.c ****                 s_have_prev = 0u;
+ 148              		.loc 1 90 17 is_stmt 1 view .LVU34
+ 149              		.loc 1 90 29 is_stmt 0 view .LVU35
+ 150 0010 124B     		ldr	r3, .L17+8
+ 151 0012 1A70     		strb	r2, [r3]
+  91:services/crypto/jitter_rng.c ****                 return JITTER_ERR_TIMEOUT;
+ 152              		.loc 1 91 17 is_stmt 1 view .LVU36
+ 153              		.loc 1 91 24 is_stmt 0 view .LVU37
+ 154 0014 0320     		movs	r0, #3
+ 155              	.LVL7:
+ 156              		.loc 1 91 24 view .LVU38
+ 157 0016 15E0     		b	.L9
+ 158              	.LVL8:
+ 159              	.L15:
+  92:services/crypto/jitter_rng.c ****             }
+  93:services/crypto/jitter_rng.c ****         }
+  94:services/crypto/jitter_rng.c **** 
+  95:services/crypto/jitter_rng.c ****         uint16_t now = (uint16_t)TIM14->CCR1;       /* reading CCR1 clears CC1IF */
+ 160              		.loc 1 95 9 is_stmt 1 view .LVU39
+ 161              		.loc 1 95 39 is_stmt 0 view .LVU40
+ 162 0018 0F4A     		ldr	r2, .L17+4
+ 163              	.LVL9:
+ 164              		.loc 1 95 39 view .LVU41
+ 165 001a 536B     		ldr	r3, [r2, #52]
+ 166              		.loc 1 95 18 view .LVU42
+ 167 001c 9BB2     		uxth	r3, r3
+ 168              	.LVL10:
+  96:services/crypto/jitter_rng.c **** 
+  97:services/crypto/jitter_rng.c ****         if ((TIM14->SR & TIM_SR_CC1OF) != 0u)       /* we missed an edge: delta would span 2 period
+ 169              		.loc 1 97 9 is_stmt 1 view .LVU43
+ 170              		.loc 1 97 19 is_stmt 0 view .LVU44
+ 171 001e 1269     		ldr	r2, [r2, #16]
+ 172              		.loc 1 97 12 view .LVU45
+ 173 0020 9205     		lsls	r2, r2, #22
+ 174 0022 05D5     		bpl	.L11
+  98:services/crypto/jitter_rng.c ****         {
+  99:services/crypto/jitter_rng.c ****             TIM14->SR = ~(uint32_t)TIM_SR_CC1OF;    /* rc_w0: writing 0 clears, 1 has no effect */
+ 175              		.loc 1 99 13 is_stmt 1 view .LVU46
+ 176              		.loc 1 99 23 is_stmt 0 view .LVU47
+ 177 0024 0C4A     		ldr	r2, .L17+4
+ 178 0026 0E49     		ldr	r1, .L17+12
+ 179 0028 1161     		str	r1, [r2, #16]
+ 100:services/crypto/jitter_rng.c ****             s_have_prev = 0u;
+ 180              		.loc 1 100 13 is_stmt 1 view .LVU48
+ 181              		.loc 1 100 25 is_stmt 0 view .LVU49
+ 182 002a 0C4A     		ldr	r2, .L17+8
+ 183 002c 0021     		movs	r1, #0
+ 184 002e 1170     		strb	r1, [r2]
+ 185              	.L11:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 6
+
+
+ 101:services/crypto/jitter_rng.c ****         }
+ 102:services/crypto/jitter_rng.c **** 
+ 103:services/crypto/jitter_rng.c ****         if (s_have_prev == 0u)                      /* first capture only sets the reference */
+ 186              		.loc 1 103 9 is_stmt 1 view .LVU50
+ 187              		.loc 1 103 25 is_stmt 0 view .LVU51
+ 188 0030 0A4A     		ldr	r2, .L17+8
+ 189 0032 1278     		ldrb	r2, [r2]
+ 190              		.loc 1 103 12 view .LVU52
+ 191 0034 002A     		cmp	r2, #0
+ 192 0036 06D0     		beq	.L16
+ 104:services/crypto/jitter_rng.c ****         {
+ 105:services/crypto/jitter_rng.c ****             s_prev = now;
+ 106:services/crypto/jitter_rng.c ****             s_have_prev = 1u;
+ 107:services/crypto/jitter_rng.c ****             continue;
+ 108:services/crypto/jitter_rng.c ****         }
+ 109:services/crypto/jitter_rng.c **** 
+ 110:services/crypto/jitter_rng.c ****         *delta = (uint16_t)(now - s_prev);          /* wraps correctly at 16 bits */
+ 193              		.loc 1 110 9 is_stmt 1 view .LVU53
+ 194              		.loc 1 110 18 is_stmt 0 view .LVU54
+ 195 0038 0A49     		ldr	r1, .L17+16
+ 196 003a 0A88     		ldrh	r2, [r1]
+ 197 003c 9A1A     		subs	r2, r3, r2
+ 198              		.loc 1 110 16 view .LVU55
+ 199 003e 0280     		strh	r2, [r0]
+ 111:services/crypto/jitter_rng.c ****         s_prev = now;
+ 200              		.loc 1 111 9 is_stmt 1 view .LVU56
+ 201              		.loc 1 111 16 is_stmt 0 view .LVU57
+ 202 0040 0B80     		strh	r3, [r1]
+ 112:services/crypto/jitter_rng.c ****         return JITTER_OK;
+ 203              		.loc 1 112 9 is_stmt 1 view .LVU58
+ 204              		.loc 1 112 16 is_stmt 0 view .LVU59
+ 205 0042 0020     		movs	r0, #0
+ 206              	.LVL11:
+ 207              	.L9:
+ 208              		.loc 1 112 16 view .LVU60
+ 209              	.LBE2:
+ 113:services/crypto/jitter_rng.c ****     }
+ 114:services/crypto/jitter_rng.c **** }
+ 210              		.loc 1 114 1 view .LVU61
+ 211              		@ sp needed
+ 212 0044 7047     		bx	lr
+ 213              	.LVL12:
+ 214              	.L16:
+ 215              	.LBB3:
+ 105:services/crypto/jitter_rng.c ****             s_have_prev = 1u;
+ 216              		.loc 1 105 13 is_stmt 1 view .LVU62
+ 105:services/crypto/jitter_rng.c ****             s_have_prev = 1u;
+ 217              		.loc 1 105 20 is_stmt 0 view .LVU63
+ 218 0046 074A     		ldr	r2, .L17+16
+ 219 0048 1380     		strh	r3, [r2]
+ 106:services/crypto/jitter_rng.c ****             continue;
+ 220              		.loc 1 106 13 is_stmt 1 view .LVU64
+ 106:services/crypto/jitter_rng.c ****             continue;
+ 221              		.loc 1 106 25 is_stmt 0 view .LVU65
+ 222 004a 044B     		ldr	r3, .L17+8
+ 223              	.LVL13:
+ 106:services/crypto/jitter_rng.c ****             continue;
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 7
+
+
+ 224              		.loc 1 106 25 view .LVU66
+ 225 004c 0122     		movs	r2, #1
+ 106:services/crypto/jitter_rng.c ****             continue;
+ 226              		.loc 1 106 25 view .LVU67
+ 227 004e 1A70     		strb	r2, [r3]
+ 107:services/crypto/jitter_rng.c ****         }
+ 228              		.loc 1 107 13 is_stmt 1 view .LVU68
+ 229              	.LBE3:
+  82:services/crypto/jitter_rng.c ****     {
+ 230              		.loc 1 82 5 view .LVU69
+  83:services/crypto/jitter_rng.c ****         uint32_t spins = JITTER_TIMEOUT_SPINS;
+ 231              		.loc 1 83 5 is_stmt 0 view .LVU70
+ 232 0050 D6E7     		b	.L13
+ 233              	.L18:
+ 234 0052 C046     		.align	2
+ 235              	.L17:
+ 236 0054 204E0000 		.word	20000
+ 237 0058 00200040 		.word	1073750016
+ 238 005c 00000000 		.word	s_have_prev
+ 239 0060 FFFDFFFF 		.word	-513
+ 240 0064 00000000 		.word	s_prev
+ 241              		.cfi_endproc
+ 242              	.LFE42:
+ 244              		.section	.text.health_feed,"ax",%progbits
+ 245              		.align	1
+ 246              		.syntax unified
+ 247              		.code	16
+ 248              		.thumb_func
+ 250              	health_feed:
+ 251              	.LVL14:
+ 252              	.LFB43:
+ 115:services/crypto/jitter_rng.c **** 
+ 116:services/crypto/jitter_rng.c **** /* ---- SP 800-90B continuous health tests (4.4.1 and 4.4.2) -------------- */
+ 117:services/crypto/jitter_rng.c **** static uint8_t health_feed(uint8_t sym)            /* returns 1 on failure */
+ 118:services/crypto/jitter_rng.c **** {
+ 253              		.loc 1 118 1 is_stmt 1 view -0
+ 254              		.cfi_startproc
+ 255              		@ args = 0, pretend = 0, frame = 0
+ 256              		@ frame_needed = 0, uses_anonymous_args = 0
+ 257              		@ link register save eliminated.
+ 119:services/crypto/jitter_rng.c ****     /* Repetition Count Test */
+ 120:services/crypto/jitter_rng.c ****     if (sym == s_rct_last)
+ 258              		.loc 1 120 5 view .LVU72
+ 259              		.loc 1 120 13 is_stmt 0 view .LVU73
+ 260 0000 1F4B     		ldr	r3, .L30
+ 261 0002 1B78     		ldrb	r3, [r3]
+ 262              		.loc 1 120 8 view .LVU74
+ 263 0004 8342     		cmp	r3, r0
+ 264 0006 11D0     		beq	.L28
+ 121:services/crypto/jitter_rng.c ****     {
+ 122:services/crypto/jitter_rng.c ****         if (++s_rct_cnt >= JITTER_RCT_CUTOFF)
+ 123:services/crypto/jitter_rng.c ****             return 1u;
+ 124:services/crypto/jitter_rng.c ****     }
+ 125:services/crypto/jitter_rng.c ****     else
+ 126:services/crypto/jitter_rng.c ****     {
+ 127:services/crypto/jitter_rng.c ****         s_rct_last = sym;
+ 265              		.loc 1 127 9 is_stmt 1 view .LVU75
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 8
+
+
+ 266              		.loc 1 127 20 is_stmt 0 view .LVU76
+ 267 0008 1D4B     		ldr	r3, .L30
+ 268 000a 1870     		strb	r0, [r3]
+ 128:services/crypto/jitter_rng.c ****         s_rct_cnt  = 1u;
+ 269              		.loc 1 128 9 is_stmt 1 view .LVU77
+ 270              		.loc 1 128 20 is_stmt 0 view .LVU78
+ 271 000c 1D4B     		ldr	r3, .L30+4
+ 272 000e 0122     		movs	r2, #1
+ 273 0010 1A70     		strb	r2, [r3]
+ 274              	.L22:
+ 129:services/crypto/jitter_rng.c ****     }
+ 130:services/crypto/jitter_rng.c **** 
+ 131:services/crypto/jitter_rng.c ****     /* Adaptive Proportion Test */
+ 132:services/crypto/jitter_rng.c ****     if (s_apt_pos == 0u)
+ 275              		.loc 1 132 5 is_stmt 1 view .LVU79
+ 276              		.loc 1 132 19 is_stmt 0 view .LVU80
+ 277 0012 1D4B     		ldr	r3, .L30+8
+ 278 0014 1B88     		ldrh	r3, [r3]
+ 279              		.loc 1 132 8 view .LVU81
+ 280 0016 002B     		cmp	r3, #0
+ 281 0018 11D1     		bne	.L23
+ 133:services/crypto/jitter_rng.c ****     {
+ 134:services/crypto/jitter_rng.c ****         s_apt_ref = sym;
+ 282              		.loc 1 134 9 is_stmt 1 view .LVU82
+ 283              		.loc 1 134 19 is_stmt 0 view .LVU83
+ 284 001a 1C4B     		ldr	r3, .L30+12
+ 285 001c 1870     		strb	r0, [r3]
+ 135:services/crypto/jitter_rng.c ****         s_apt_cnt = 1u;
+ 286              		.loc 1 135 9 is_stmt 1 view .LVU84
+ 287              		.loc 1 135 19 is_stmt 0 view .LVU85
+ 288 001e 1C4B     		ldr	r3, .L30+16
+ 289 0020 0122     		movs	r2, #1
+ 290 0022 1A80     		strh	r2, [r3]
+ 136:services/crypto/jitter_rng.c ****         s_apt_pos = 1u;
+ 291              		.loc 1 136 9 is_stmt 1 view .LVU86
+ 292              		.loc 1 136 19 is_stmt 0 view .LVU87
+ 293 0024 184B     		ldr	r3, .L30+8
+ 294 0026 1A80     		strh	r2, [r3]
+ 137:services/crypto/jitter_rng.c ****     }
+ 138:services/crypto/jitter_rng.c ****     else
+ 139:services/crypto/jitter_rng.c ****     {
+ 140:services/crypto/jitter_rng.c ****         if (sym == s_apt_ref)
+ 141:services/crypto/jitter_rng.c ****             s_apt_cnt++;
+ 142:services/crypto/jitter_rng.c ****         if (s_apt_cnt >= JITTER_APT_CUTOFF)
+ 143:services/crypto/jitter_rng.c ****             return 1u;
+ 144:services/crypto/jitter_rng.c ****         if (++s_apt_pos >= JITTER_APT_WINDOW)
+ 145:services/crypto/jitter_rng.c ****             s_apt_pos = 0u;
+ 146:services/crypto/jitter_rng.c ****     }
+ 147:services/crypto/jitter_rng.c ****     return 0u;
+ 295              		.loc 1 147 12 view .LVU88
+ 296 0028 0020     		movs	r0, #0
+ 297              	.LVL15:
+ 298              	.L21:
+ 148:services/crypto/jitter_rng.c **** }
+ 299              		.loc 1 148 1 view .LVU89
+ 300              		@ sp needed
+ 301 002a 7047     		bx	lr
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 9
+
+
+ 302              	.LVL16:
+ 303              	.L28:
+ 122:services/crypto/jitter_rng.c ****             return 1u;
+ 304              		.loc 1 122 9 is_stmt 1 view .LVU90
+ 122:services/crypto/jitter_rng.c ****             return 1u;
+ 305              		.loc 1 122 13 is_stmt 0 view .LVU91
+ 306 002c 154A     		ldr	r2, .L30+4
+ 307 002e 1378     		ldrb	r3, [r2]
+ 308 0030 0133     		adds	r3, r3, #1
+ 309 0032 DBB2     		uxtb	r3, r3
+ 122:services/crypto/jitter_rng.c ****             return 1u;
+ 310              		.loc 1 122 12 view .LVU92
+ 311 0034 1370     		strb	r3, [r2]
+ 312 0036 A02B     		cmp	r3, #160
+ 313 0038 EBD9     		bls	.L22
+ 123:services/crypto/jitter_rng.c ****     }
+ 314              		.loc 1 123 20 view .LVU93
+ 315 003a 0120     		movs	r0, #1
+ 316              	.LVL17:
+ 123:services/crypto/jitter_rng.c ****     }
+ 317              		.loc 1 123 20 view .LVU94
+ 318 003c F5E7     		b	.L21
+ 319              	.LVL18:
+ 320              	.L23:
+ 140:services/crypto/jitter_rng.c ****             s_apt_cnt++;
+ 321              		.loc 1 140 9 is_stmt 1 view .LVU95
+ 140:services/crypto/jitter_rng.c ****             s_apt_cnt++;
+ 322              		.loc 1 140 17 is_stmt 0 view .LVU96
+ 323 003e 134A     		ldr	r2, .L30+12
+ 324 0040 1278     		ldrb	r2, [r2]
+ 140:services/crypto/jitter_rng.c ****             s_apt_cnt++;
+ 325              		.loc 1 140 12 view .LVU97
+ 326 0042 8242     		cmp	r2, r0
+ 327 0044 12D0     		beq	.L29
+ 328              	.L24:
+ 142:services/crypto/jitter_rng.c ****             return 1u;
+ 329              		.loc 1 142 9 is_stmt 1 view .LVU98
+ 142:services/crypto/jitter_rng.c ****             return 1u;
+ 330              		.loc 1 142 23 is_stmt 0 view .LVU99
+ 331 0046 124A     		ldr	r2, .L30+16
+ 332 0048 1188     		ldrh	r1, [r2]
+ 142:services/crypto/jitter_rng.c ****             return 1u;
+ 333              		.loc 1 142 12 view .LVU100
+ 334 004a F822     		movs	r2, #248
+ 335 004c 5200     		lsls	r2, r2, #1
+ 336 004e 9142     		cmp	r1, r2
+ 337 0050 11D8     		bhi	.L26
+ 144:services/crypto/jitter_rng.c ****             s_apt_pos = 0u;
+ 338              		.loc 1 144 9 is_stmt 1 view .LVU101
+ 144:services/crypto/jitter_rng.c ****             s_apt_pos = 0u;
+ 339              		.loc 1 144 13 is_stmt 0 view .LVU102
+ 340 0052 0133     		adds	r3, r3, #1
+ 341 0054 9BB2     		uxth	r3, r3
+ 144:services/crypto/jitter_rng.c ****             s_apt_pos = 0u;
+ 342              		.loc 1 144 12 view .LVU103
+ 343 0056 0C4A     		ldr	r2, .L30+8
+ 344 0058 1380     		strh	r3, [r2]
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 10
+
+
+ 345 005a 8022     		movs	r2, #128
+ 346 005c 9200     		lsls	r2, r2, #2
+ 347 005e 9342     		cmp	r3, r2
+ 348 0060 0BD3     		bcc	.L27
+ 145:services/crypto/jitter_rng.c ****     }
+ 349              		.loc 1 145 13 is_stmt 1 view .LVU104
+ 145:services/crypto/jitter_rng.c ****     }
+ 350              		.loc 1 145 23 is_stmt 0 view .LVU105
+ 351 0062 094B     		ldr	r3, .L30+8
+ 352 0064 0022     		movs	r2, #0
+ 353 0066 1A80     		strh	r2, [r3]
+ 147:services/crypto/jitter_rng.c **** }
+ 354              		.loc 1 147 12 view .LVU106
+ 355 0068 0020     		movs	r0, #0
+ 356              	.LVL19:
+ 147:services/crypto/jitter_rng.c **** }
+ 357              		.loc 1 147 12 view .LVU107
+ 358 006a DEE7     		b	.L21
+ 359              	.LVL20:
+ 360              	.L29:
+ 141:services/crypto/jitter_rng.c ****         if (s_apt_cnt >= JITTER_APT_CUTOFF)
+ 361              		.loc 1 141 13 is_stmt 1 view .LVU108
+ 141:services/crypto/jitter_rng.c ****         if (s_apt_cnt >= JITTER_APT_CUTOFF)
+ 362              		.loc 1 141 22 is_stmt 0 view .LVU109
+ 363 006c 0849     		ldr	r1, .L30+16
+ 364 006e 0A88     		ldrh	r2, [r1]
+ 365 0070 0132     		adds	r2, r2, #1
+ 366 0072 0A80     		strh	r2, [r1]
+ 367 0074 E7E7     		b	.L24
+ 368              	.L26:
+ 143:services/crypto/jitter_rng.c ****         if (++s_apt_pos >= JITTER_APT_WINDOW)
+ 369              		.loc 1 143 20 view .LVU110
+ 370 0076 0120     		movs	r0, #1
+ 371              	.LVL21:
+ 143:services/crypto/jitter_rng.c ****         if (++s_apt_pos >= JITTER_APT_WINDOW)
+ 372              		.loc 1 143 20 view .LVU111
+ 373 0078 D7E7     		b	.L21
+ 374              	.LVL22:
+ 375              	.L27:
+ 147:services/crypto/jitter_rng.c **** }
+ 376              		.loc 1 147 12 view .LVU112
+ 377 007a 0020     		movs	r0, #0
+ 378              	.LVL23:
+ 147:services/crypto/jitter_rng.c **** }
+ 379              		.loc 1 147 12 view .LVU113
+ 380 007c D5E7     		b	.L21
+ 381              	.L31:
+ 382 007e C046     		.align	2
+ 383              	.L30:
+ 384 0080 00000000 		.word	s_rct_last
+ 385 0084 00000000 		.word	s_rct_cnt
+ 386 0088 00000000 		.word	s_apt_pos
+ 387 008c 00000000 		.word	s_apt_ref
+ 388 0090 00000000 		.word	s_apt_cnt
+ 389              		.cfi_endproc
+ 390              	.LFE43:
+ 392              		.section	.text.clock_48mhz_init,"ax",%progbits
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 11
+
+
+ 393              		.align	1
+ 394              		.syntax unified
+ 395              		.code	16
+ 396              		.thumb_func
+ 398              	clock_48mhz_init:
+ 399              	.LFB44:
+ 149:services/crypto/jitter_rng.c **** 
+ 150:services/crypto/jitter_rng.c **** /* ---- system clock: HSE -> PLL -> 48 MHz (Clock A) ------------------------ */
+ 151:services/crypto/jitter_rng.c **** /* Idempotent: if the system clock already runs from the PLL (set up by the
+ 152:services/crypto/jitter_rng.c ****  * startup code or another module) nothing is touched. Returns 0 on success. */
+ 153:services/crypto/jitter_rng.c **** static uint8_t clock_48mhz_init(void)
+ 154:services/crypto/jitter_rng.c **** {
+ 400              		.loc 1 154 1 is_stmt 1 view -0
+ 401              		.cfi_startproc
+ 402              		@ args = 0, pretend = 0, frame = 0
+ 403              		@ frame_needed = 0, uses_anonymous_args = 0
+ 404 0000 10B5     		push	{r4, lr}
+ 405              	.LCFI0:
+ 406              		.cfi_def_cfa_offset 8
+ 407              		.cfi_offset 4, -8
+ 408              		.cfi_offset 14, -4
+ 155:services/crypto/jitter_rng.c ****     uint32_t t;
+ 409              		.loc 1 155 5 view .LVU115
+ 156:services/crypto/jitter_rng.c **** 
+ 157:services/crypto/jitter_rng.c ****     if ((RCC->CFGR & RCC_CFGR_SWS) == RCC_CFGR_SWS_PLL)
+ 410              		.loc 1 157 5 view .LVU116
+ 411              		.loc 1 157 13 is_stmt 0 view .LVU117
+ 412 0002 254B     		ldr	r3, .L47
+ 413 0004 5A68     		ldr	r2, [r3, #4]
+ 414              		.loc 1 157 20 view .LVU118
+ 415 0006 0C23     		movs	r3, #12
+ 416 0008 1340     		ands	r3, r2
+ 417              		.loc 1 157 8 view .LVU119
+ 418 000a 082B     		cmp	r3, #8
+ 419 000c 42D0     		beq	.L40
+ 158:services/crypto/jitter_rng.c ****         return 0u;
+ 159:services/crypto/jitter_rng.c **** 
+ 160:services/crypto/jitter_rng.c ****     RCC->CR |= RCC_CR_HSEON;
+ 420              		.loc 1 160 5 is_stmt 1 view .LVU120
+ 421              		.loc 1 160 8 is_stmt 0 view .LVU121
+ 422 000e 224A     		ldr	r2, .L47
+ 423 0010 1168     		ldr	r1, [r2]
+ 424              		.loc 1 160 13 view .LVU122
+ 425 0012 8023     		movs	r3, #128
+ 426 0014 5B02     		lsls	r3, r3, #9
+ 427 0016 0B43     		orrs	r3, r1
+ 428 0018 1360     		str	r3, [r2]
+ 161:services/crypto/jitter_rng.c ****     t = JITTER_CLK_SPINS;
+ 429              		.loc 1 161 5 is_stmt 1 view .LVU123
+ 430              	.LVL24:
+ 162:services/crypto/jitter_rng.c ****     while ((RCC->CR & RCC_CR_HSERDY) == 0u)
+ 431              		.loc 1 162 5 view .LVU124
+ 161:services/crypto/jitter_rng.c ****     t = JITTER_CLK_SPINS;
+ 432              		.loc 1 161 7 is_stmt 0 view .LVU125
+ 433 001a 204A     		ldr	r2, .L47+4
+ 434              	.LVL25:
+ 435              	.L34:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 12
+
+
+ 436              		.loc 1 162 38 is_stmt 1 view .LVU126
+ 437              		.loc 1 162 16 is_stmt 0 view .LVU127
+ 438 001c 1E4B     		ldr	r3, .L47
+ 439 001e 1B68     		ldr	r3, [r3]
+ 440              		.loc 1 162 38 view .LVU128
+ 441 0020 9B03     		lsls	r3, r3, #14
+ 442 0022 04D4     		bmi	.L44
+ 163:services/crypto/jitter_rng.c ****         if (--t == 0u)
+ 443              		.loc 1 163 9 is_stmt 1 view .LVU129
+ 444              		.loc 1 163 12 is_stmt 0 view .LVU130
+ 445 0024 013A     		subs	r2, r2, #1
+ 446              	.LVL26:
+ 447              		.loc 1 163 12 view .LVU131
+ 448 0026 002A     		cmp	r2, #0
+ 449 0028 F8D1     		bne	.L34
+ 164:services/crypto/jitter_rng.c ****             return 1u;
+ 450              		.loc 1 164 20 view .LVU132
+ 451 002a 0120     		movs	r0, #1
+ 452 002c 31E0     		b	.L33
+ 453              	.L44:
+ 165:services/crypto/jitter_rng.c **** 
+ 166:services/crypto/jitter_rng.c ****     FLASH->ACR |= FLASH_ACR_PRFTBE | FLASH_ACR_LATENCY;   /* 1 wait state above 24 MHz */
+ 454              		.loc 1 166 5 is_stmt 1 view .LVU133
+ 455              		.loc 1 166 10 is_stmt 0 view .LVU134
+ 456 002e 1C4A     		ldr	r2, .L47+8
+ 457              	.LVL27:
+ 458              		.loc 1 166 10 view .LVU135
+ 459 0030 1368     		ldr	r3, [r2]
+ 460              		.loc 1 166 16 view .LVU136
+ 461 0032 1121     		movs	r1, #17
+ 462 0034 0B43     		orrs	r3, r1
+ 463 0036 1360     		str	r3, [r2]
+ 167:services/crypto/jitter_rng.c **** 
+ 168:services/crypto/jitter_rng.c ****     RCC->CFGR = (RCC->CFGR & ~(RCC_CFGR_PLLSRC | RCC_CFGR_PLLMUL))
+ 464              		.loc 1 168 5 is_stmt 1 view .LVU137
+ 465              		.loc 1 168 21 is_stmt 0 view .LVU138
+ 466 0038 174B     		ldr	r3, .L47
+ 467 003a 5968     		ldr	r1, [r3, #4]
+ 468              		.loc 1 168 28 view .LVU139
+ 469 003c 194A     		ldr	r2, .L47+12
+ 470 003e 1140     		ands	r1, r2
+ 169:services/crypto/jitter_rng.c ****               | RCC_CFGR_PLLSRC_HSE_PREDIV | JITTER_PLL_MUL;
+ 471              		.loc 1 169 44 view .LVU140
+ 472 0040 8822     		movs	r2, #136
+ 473 0042 5203     		lsls	r2, r2, #13
+ 474 0044 0A43     		orrs	r2, r1
+ 168:services/crypto/jitter_rng.c ****               | RCC_CFGR_PLLSRC_HSE_PREDIV | JITTER_PLL_MUL;
+ 475              		.loc 1 168 15 view .LVU141
+ 476 0046 5A60     		str	r2, [r3, #4]
+ 170:services/crypto/jitter_rng.c **** 
+ 171:services/crypto/jitter_rng.c ****     RCC->CR |= RCC_CR_PLLON;
+ 477              		.loc 1 171 5 is_stmt 1 view .LVU142
+ 478              		.loc 1 171 8 is_stmt 0 view .LVU143
+ 479 0048 1968     		ldr	r1, [r3]
+ 480              		.loc 1 171 13 view .LVU144
+ 481 004a 8022     		movs	r2, #128
+ 482 004c 5204     		lsls	r2, r2, #17
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 13
+
+
+ 483 004e 0A43     		orrs	r2, r1
+ 484 0050 1A60     		str	r2, [r3]
+ 172:services/crypto/jitter_rng.c ****     t = JITTER_CLK_SPINS;
+ 485              		.loc 1 172 5 is_stmt 1 view .LVU145
+ 486              	.LVL28:
+ 173:services/crypto/jitter_rng.c ****     while ((RCC->CR & RCC_CR_PLLRDY) == 0u)
+ 487              		.loc 1 173 5 view .LVU146
+ 172:services/crypto/jitter_rng.c ****     t = JITTER_CLK_SPINS;
+ 488              		.loc 1 172 7 is_stmt 0 view .LVU147
+ 489 0052 124A     		ldr	r2, .L47+4
+ 490              	.LVL29:
+ 491              	.L36:
+ 492              		.loc 1 173 38 is_stmt 1 view .LVU148
+ 493              		.loc 1 173 16 is_stmt 0 view .LVU149
+ 494 0054 104B     		ldr	r3, .L47
+ 495 0056 1B68     		ldr	r3, [r3]
+ 496              		.loc 1 173 38 view .LVU150
+ 497 0058 9B01     		lsls	r3, r3, #6
+ 498 005a 04D4     		bmi	.L45
+ 174:services/crypto/jitter_rng.c ****         if (--t == 0u)
+ 499              		.loc 1 174 9 is_stmt 1 view .LVU151
+ 500              		.loc 1 174 12 is_stmt 0 view .LVU152
+ 501 005c 013A     		subs	r2, r2, #1
+ 502              	.LVL30:
+ 503              		.loc 1 174 12 view .LVU153
+ 504 005e 002A     		cmp	r2, #0
+ 505 0060 F8D1     		bne	.L36
+ 175:services/crypto/jitter_rng.c ****             return 1u;
+ 506              		.loc 1 175 20 view .LVU154
+ 507 0062 0120     		movs	r0, #1
+ 508 0064 15E0     		b	.L33
+ 509              	.L45:
+ 176:services/crypto/jitter_rng.c **** 
+ 177:services/crypto/jitter_rng.c ****     RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW) | RCC_CFGR_SW_PLL;
+ 510              		.loc 1 177 5 is_stmt 1 view .LVU155
+ 511              		.loc 1 177 21 is_stmt 0 view .LVU156
+ 512 0066 0C4A     		ldr	r2, .L47
+ 513              	.LVL31:
+ 514              		.loc 1 177 21 view .LVU157
+ 515 0068 5368     		ldr	r3, [r2, #4]
+ 516              		.loc 1 177 28 view .LVU158
+ 517 006a 0321     		movs	r1, #3
+ 518 006c 8B43     		bics	r3, r1
+ 519              		.loc 1 177 44 view .LVU159
+ 520 006e 0139     		subs	r1, r1, #1
+ 521 0070 0B43     		orrs	r3, r1
+ 522              		.loc 1 177 15 view .LVU160
+ 523 0072 5360     		str	r3, [r2, #4]
+ 178:services/crypto/jitter_rng.c ****     t = JITTER_CLK_SPINS;
+ 524              		.loc 1 178 5 is_stmt 1 view .LVU161
+ 525              	.LVL32:
+ 179:services/crypto/jitter_rng.c ****     while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL)
+ 526              		.loc 1 179 5 view .LVU162
+ 178:services/crypto/jitter_rng.c ****     t = JITTER_CLK_SPINS;
+ 527              		.loc 1 178 7 is_stmt 0 view .LVU163
+ 528 0074 094A     		ldr	r2, .L47+4
+ 529              	.LVL33:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 14
+
+
+ 530              	.L38:
+ 531              		.loc 1 179 39 is_stmt 1 view .LVU164
+ 532              		.loc 1 179 16 is_stmt 0 view .LVU165
+ 533 0076 084B     		ldr	r3, .L47
+ 534 0078 5968     		ldr	r1, [r3, #4]
+ 535              		.loc 1 179 23 view .LVU166
+ 536 007a 0C23     		movs	r3, #12
+ 537 007c 0B40     		ands	r3, r1
+ 538              		.loc 1 179 39 view .LVU167
+ 539 007e 082B     		cmp	r3, #8
+ 540 0080 04D0     		beq	.L46
+ 180:services/crypto/jitter_rng.c ****         if (--t == 0u)
+ 541              		.loc 1 180 9 is_stmt 1 view .LVU168
+ 542              		.loc 1 180 12 is_stmt 0 view .LVU169
+ 543 0082 013A     		subs	r2, r2, #1
+ 544              	.LVL34:
+ 545              		.loc 1 180 12 view .LVU170
+ 546 0084 002A     		cmp	r2, #0
+ 547 0086 F6D1     		bne	.L38
+ 181:services/crypto/jitter_rng.c ****             return 1u;
+ 548              		.loc 1 181 20 view .LVU171
+ 549 0088 0120     		movs	r0, #1
+ 550 008a 02E0     		b	.L33
+ 551              	.L46:
+ 182:services/crypto/jitter_rng.c **** 
+ 183:services/crypto/jitter_rng.c ****     SystemCoreClockUpdate();                         /* keep CMSIS SystemCoreClock correct */
+ 552              		.loc 1 183 5 is_stmt 1 view .LVU172
+ 553 008c FFF7FEFF 		bl	SystemCoreClockUpdate
+ 554              	.LVL35:
+ 184:services/crypto/jitter_rng.c ****     return 0u;
+ 555              		.loc 1 184 5 view .LVU173
+ 556              		.loc 1 184 12 is_stmt 0 view .LVU174
+ 557 0090 0020     		movs	r0, #0
+ 558              	.LVL36:
+ 559              	.L33:
+ 185:services/crypto/jitter_rng.c **** }
+ 560              		.loc 1 185 1 view .LVU175
+ 561              		@ sp needed
+ 562 0092 10BD     		pop	{r4, pc}
+ 563              	.L40:
+ 158:services/crypto/jitter_rng.c **** 
+ 564              		.loc 1 158 16 view .LVU176
+ 565 0094 0020     		movs	r0, #0
+ 566 0096 FCE7     		b	.L33
+ 567              	.L48:
+ 568              		.align	2
+ 569              	.L47:
+ 570 0098 00100240 		.word	1073876992
+ 571 009c 400D0300 		.word	200000
+ 572 00a0 00200240 		.word	1073881088
+ 573 00a4 FF7FC2FF 		.word	-4030465
+ 574              		.cfi_endproc
+ 575              	.LFE44:
+ 577              		.section	.text.make_block,"ax",%progbits
+ 578              		.align	1
+ 579              		.syntax unified
+ 580              		.code	16
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 15
+
+
+ 581              		.thumb_func
+ 583              	make_block:
+ 584              	.LVL37:
+ 585              	.LFB46:
+ 186:services/crypto/jitter_rng.c **** 
+ 187:services/crypto/jitter_rng.c **** /* ---- init --------------------------------------------------------------- */
+ 188:services/crypto/jitter_rng.c **** uint8_t jitter_rng_init(void)
+ 189:services/crypto/jitter_rng.c **** {
+ 190:services/crypto/jitter_rng.c ****     uint32_t t;
+ 191:services/crypto/jitter_rng.c ****     uint16_t d;
+ 192:services/crypto/jitter_rng.c **** 
+ 193:services/crypto/jitter_rng.c ****     s_ready = 0u;
+ 194:services/crypto/jitter_rng.c ****     s_failed = 0u;
+ 195:services/crypto/jitter_rng.c ****     s_have_prev = 0u;
+ 196:services/crypto/jitter_rng.c ****     health_reset();
+ 197:services/crypto/jitter_rng.c **** 
+ 198:services/crypto/jitter_rng.c ****     /* clock A: 48 MHz from HSE + PLL (skipped if already running from the PLL) */
+ 199:services/crypto/jitter_rng.c ****     if (clock_48mhz_init() != 0u)
+ 200:services/crypto/jitter_rng.c ****         return JITTER_ERR_INIT;
+ 201:services/crypto/jitter_rng.c **** 
+ 202:services/crypto/jitter_rng.c ****     /* backup-domain write access (needed for RTCSEL) and TIM14 clock */
+ 203:services/crypto/jitter_rng.c ****     RCC->APB1ENR |= RCC_APB1ENR_PWREN | RCC_APB1ENR_TIM14EN;
+ 204:services/crypto/jitter_rng.c ****     PWR->CR |= PWR_CR_DBP;
+ 205:services/crypto/jitter_rng.c **** 
+ 206:services/crypto/jitter_rng.c ****     /* clock B: LSI on */
+ 207:services/crypto/jitter_rng.c ****     RCC->CSR |= RCC_CSR_LSION;
+ 208:services/crypto/jitter_rng.c ****     t = JITTER_LSI_START_SPINS;
+ 209:services/crypto/jitter_rng.c ****     while ((RCC->CSR & RCC_CSR_LSIRDY) == 0u)
+ 210:services/crypto/jitter_rng.c ****     {
+ 211:services/crypto/jitter_rng.c ****         if (--t == 0u)
+ 212:services/crypto/jitter_rng.c ****         {
+ 213:services/crypto/jitter_rng.c ****             PWR->CR &= ~PWR_CR_DBP;
+ 214:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 215:services/crypto/jitter_rng.c ****         }
+ 216:services/crypto/jitter_rng.c ****     }
+ 217:services/crypto/jitter_rng.c **** 
+ 218:services/crypto/jitter_rng.c ****     /* RTC clock = LSI. RTCSEL can only be written once until a backup-domain
+ 219:services/crypto/jitter_rng.c ****      * reset, so if something else already chose a source we stop. */
+ 220:services/crypto/jitter_rng.c ****     {
+ 221:services/crypto/jitter_rng.c ****         uint32_t sel = RCC->BDCR & RCC_BDCR_RTCSEL;
+ 222:services/crypto/jitter_rng.c ****         if (sel == 0u)
+ 223:services/crypto/jitter_rng.c ****             RCC->BDCR |= RCC_BDCR_RTCSEL_1;          /* 10 = LSI */
+ 224:services/crypto/jitter_rng.c ****         else if (sel != RCC_BDCR_RTCSEL_1)
+ 225:services/crypto/jitter_rng.c ****         {
+ 226:services/crypto/jitter_rng.c ****             PWR->CR &= ~PWR_CR_DBP;
+ 227:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 228:services/crypto/jitter_rng.c ****         }
+ 229:services/crypto/jitter_rng.c ****         RCC->BDCR |= RCC_BDCR_RTCEN;
+ 230:services/crypto/jitter_rng.c ****     }
+ 231:services/crypto/jitter_rng.c **** 
+ 232:services/crypto/jitter_rng.c ****     /* backup-domain writes are done: close write access again.
+ 233:services/crypto/jitter_rng.c ****      * (Remove this line if another module needs DBP to stay set.) */
+ 234:services/crypto/jitter_rng.c ****     PWR->CR &= ~PWR_CR_DBP;
+ 235:services/crypto/jitter_rng.c **** 
+ 236:services/crypto/jitter_rng.c ****     /* TIM14: counts the 48 MHz clock, captures on every rising LSI edge */
+ 237:services/crypto/jitter_rng.c ****     TIM14->CR1   = 0u;
+ 238:services/crypto/jitter_rng.c ****     TIM14->OR    = TIM14_OR_TI1_RMP_0;               /* 01: TI1 <- RTC_CLK */
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 16
+
+
+ 239:services/crypto/jitter_rng.c ****     TIM14->PSC   = 0u;
+ 240:services/crypto/jitter_rng.c ****     TIM14->ARR   = 0xFFFFu;
+ 241:services/crypto/jitter_rng.c ****     TIM14->CCMR1 = TIM_CCMR1_CC1S_0;                 /* CC1 = input on TI1, no filter, no prescaler
+ 242:services/crypto/jitter_rng.c ****     TIM14->CCER  = TIM_CCER_CC1E;                    /* rising edge, capture enabled */
+ 243:services/crypto/jitter_rng.c ****     TIM14->EGR   = TIM_EGR_UG;
+ 244:services/crypto/jitter_rng.c ****     TIM14->SR    = 0u;
+ 245:services/crypto/jitter_rng.c ****     TIM14->CR1   = TIM_CR1_CEN;
+ 246:services/crypto/jitter_rng.c **** 
+ 247:services/crypto/jitter_rng.c ****     /* self-test 1: edges must arrive and the period must be plausible */
+ 248:services/crypto/jitter_rng.c ****     for (uint8_t i = 0u; i < 32u; i++)
+ 249:services/crypto/jitter_rng.c ****     {
+ 250:services/crypto/jitter_rng.c ****         if (next_delta(&d) != JITTER_OK)
+ 251:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 252:services/crypto/jitter_rng.c ****         if (d < JITTER_DELTA_MIN || d > JITTER_DELTA_MAX)
+ 253:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 254:services/crypto/jitter_rng.c ****     }
+ 255:services/crypto/jitter_rng.c **** 
+ 256:services/crypto/jitter_rng.c ****     /* self-test 2: SP 800-90B startup health tests, 1024 samples, no output.
+ 257:services/crypto/jitter_rng.c ****      * The test state carries over into normal operation. */
+ 258:services/crypto/jitter_rng.c ****     health_reset();
+ 259:services/crypto/jitter_rng.c ****     for (uint16_t n = 0u; n < JITTER_STARTUP_SAMPLES; n++)
+ 260:services/crypto/jitter_rng.c ****     {
+ 261:services/crypto/jitter_rng.c ****         if (next_delta(&d) != JITTER_OK)
+ 262:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 263:services/crypto/jitter_rng.c ****         if (health_feed((uint8_t)(d & JITTER_SYMBOL_MASK)) != 0u)
+ 264:services/crypto/jitter_rng.c ****             return JITTER_ERR_HEALTH;
+ 265:services/crypto/jitter_rng.c ****     }
+ 266:services/crypto/jitter_rng.c **** 
+ 267:services/crypto/jitter_rng.c ****     s_ready = 1u;
+ 268:services/crypto/jitter_rng.c ****     return JITTER_OK;
+ 269:services/crypto/jitter_rng.c **** }
+ 270:services/crypto/jitter_rng.c **** 
+ 271:services/crypto/jitter_rng.c **** /* ---- one conditioned 16-byte block -------------------------------------- */
+ 272:services/crypto/jitter_rng.c **** static uint8_t make_block(uint8_t out[16])
+ 273:services/crypto/jitter_rng.c **** {
+ 586              		.loc 1 273 1 is_stmt 1 view -0
+ 587              		.cfi_startproc
+ 588              		@ args = 0, pretend = 0, frame = 48
+ 589              		@ frame_needed = 0, uses_anonymous_args = 0
+ 590              		.loc 1 273 1 is_stmt 0 view .LVU178
+ 591 0000 F0B5     		push	{r4, r5, r6, r7, lr}
+ 592              	.LCFI1:
+ 593              		.cfi_def_cfa_offset 20
+ 594              		.cfi_offset 4, -20
+ 595              		.cfi_offset 5, -16
+ 596              		.cfi_offset 6, -12
+ 597              		.cfi_offset 7, -8
+ 598              		.cfi_offset 14, -4
+ 599 0002 CE46     		mov	lr, r9
+ 600 0004 4746     		mov	r7, r8
+ 601 0006 80B5     		push	{r7, lr}
+ 602              	.LCFI2:
+ 603              		.cfi_def_cfa_offset 28
+ 604              		.cfi_offset 8, -28
+ 605              		.cfi_offset 9, -24
+ 606 0008 8DB0     		sub	sp, sp, #52
+ 607              	.LCFI3:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 17
+
+
+ 608              		.cfi_def_cfa_offset 80
+ 609 000a 8146     		mov	r9, r0
+ 274:services/crypto/jitter_rng.c ****     uint8_t state[16] = {0};
+ 610              		.loc 1 274 5 is_stmt 1 view .LVU179
+ 611              		.loc 1 274 13 is_stmt 0 view .LVU180
+ 612 000c 1022     		movs	r2, #16
+ 613 000e 0021     		movs	r1, #0
+ 614 0010 08A8     		add	r0, sp, #32
+ 615              	.LVL38:
+ 616              		.loc 1 274 13 view .LVU181
+ 617 0012 FFF7FEFF 		bl	memset
+ 618              	.LVL39:
+ 275:services/crypto/jitter_rng.c ****     uint8_t blk[16];
+ 619              		.loc 1 275 5 is_stmt 1 view .LVU182
+ 276:services/crypto/jitter_rng.c ****     uint8_t acc = 0u, nsym = 0u, bi = 0u;
+ 620              		.loc 1 276 5 view .LVU183
+ 277:services/crypto/jitter_rng.c **** 
+ 278:services/crypto/jitter_rng.c ****     for (uint16_t n = 0u; n < JITTER_SAMPLES_PER_BLOCK; n++)
+ 621              		.loc 1 278 5 view .LVU184
+ 622              	.LBB4:
+ 623              		.loc 1 278 10 view .LVU185
+ 624              		.loc 1 278 19 is_stmt 0 view .LVU186
+ 625 0016 0027     		movs	r7, #0
+ 626              	.LBE4:
+ 276:services/crypto/jitter_rng.c ****     uint8_t acc = 0u, nsym = 0u, bi = 0u;
+ 627              		.loc 1 276 34 view .LVU187
+ 628 0018 0023     		movs	r3, #0
+ 629 001a 9846     		mov	r8, r3
+ 276:services/crypto/jitter_rng.c ****     uint8_t acc = 0u, nsym = 0u, bi = 0u;
+ 630              		.loc 1 276 23 view .LVU188
+ 631 001c 0026     		movs	r6, #0
+ 276:services/crypto/jitter_rng.c ****     uint8_t acc = 0u, nsym = 0u, bi = 0u;
+ 632              		.loc 1 276 13 view .LVU189
+ 633 001e 0024     		movs	r4, #0
+ 634              	.LBB10:
+ 635              		.loc 1 278 5 view .LVU190
+ 636 0020 2BE0     		b	.L50
+ 637              	.LVL40:
+ 638              	.L63:
+ 639              	.LBB5:
+ 279:services/crypto/jitter_rng.c ****     {
+ 280:services/crypto/jitter_rng.c ****         uint16_t d;
+ 281:services/crypto/jitter_rng.c ****         uint8_t r = next_delta(&d);
+ 282:services/crypto/jitter_rng.c ****         if (r != JITTER_OK)
+ 283:services/crypto/jitter_rng.c ****         {
+ 284:services/crypto/jitter_rng.c ****             wipe(state, 16); wipe(blk, 16);
+ 640              		.loc 1 284 13 is_stmt 1 view .LVU191
+ 641 0022 1021     		movs	r1, #16
+ 642 0024 08A8     		add	r0, sp, #32
+ 643              	.LVL41:
+ 644              		.loc 1 284 13 is_stmt 0 view .LVU192
+ 645 0026 FFF7FEFF 		bl	wipe
+ 646              	.LVL42:
+ 647              		.loc 1 284 30 is_stmt 1 discriminator 1 view .LVU193
+ 648 002a 1021     		movs	r1, #16
+ 649 002c 04A8     		add	r0, sp, #16
+ 650 002e FFF7FEFF 		bl	wipe
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 18
+
+
+ 651              	.LVL43:
+ 285:services/crypto/jitter_rng.c ****             return r;
+ 652              		.loc 1 285 13 view .LVU194
+ 653              	.L57:
+ 654              		.loc 1 285 13 is_stmt 0 view .LVU195
+ 655              	.LBE5:
+ 656              	.LBE10:
+ 286:services/crypto/jitter_rng.c ****         }
+ 287:services/crypto/jitter_rng.c **** 
+ 288:services/crypto/jitter_rng.c ****         uint8_t sym = (uint8_t)(d & JITTER_SYMBOL_MASK);
+ 289:services/crypto/jitter_rng.c ****         if (health_feed(sym) != 0u)
+ 290:services/crypto/jitter_rng.c ****         {
+ 291:services/crypto/jitter_rng.c ****             wipe(state, 16); wipe(blk, 16);
+ 292:services/crypto/jitter_rng.c ****             return JITTER_ERR_HEALTH;
+ 293:services/crypto/jitter_rng.c ****         }
+ 294:services/crypto/jitter_rng.c **** 
+ 295:services/crypto/jitter_rng.c ****         acc = (uint8_t)((acc << 2) | sym);
+ 296:services/crypto/jitter_rng.c ****         if (++nsym == 4u)                            /* 4 symbols -> 1 byte */
+ 297:services/crypto/jitter_rng.c ****         {
+ 298:services/crypto/jitter_rng.c ****             nsym = 0u;
+ 299:services/crypto/jitter_rng.c ****             blk[bi++] = acc;
+ 300:services/crypto/jitter_rng.c ****             acc = 0u;
+ 301:services/crypto/jitter_rng.c ****             if (bi == 16u)                           /* 64 symbols -> 1 AES block */
+ 302:services/crypto/jitter_rng.c ****             {
+ 303:services/crypto/jitter_rng.c ****                 bi = 0u;
+ 304:services/crypto/jitter_rng.c ****                 for (uint8_t i = 0u; i < 16u; i++)
+ 305:services/crypto/jitter_rng.c ****                     state[i] ^= blk[i];
+ 306:services/crypto/jitter_rng.c ****                 aes128_encrypt_block(k_cond_key, state, state);   /* CBC-MAC step */
+ 307:services/crypto/jitter_rng.c ****             }
+ 308:services/crypto/jitter_rng.c ****         }
+ 309:services/crypto/jitter_rng.c ****     }
+ 310:services/crypto/jitter_rng.c **** 
+ 311:services/crypto/jitter_rng.c ****     for (uint8_t i = 0u; i < 16u; i++)
+ 312:services/crypto/jitter_rng.c ****         out[i] = state[i];
+ 313:services/crypto/jitter_rng.c **** 
+ 314:services/crypto/jitter_rng.c ****     wipe(state, 16);
+ 315:services/crypto/jitter_rng.c ****     wipe(blk, 16);
+ 316:services/crypto/jitter_rng.c ****     return JITTER_OK;
+ 317:services/crypto/jitter_rng.c **** }
+ 657              		.loc 1 317 1 view .LVU196
+ 658 0032 2800     		movs	r0, r5
+ 659 0034 0DB0     		add	sp, sp, #52
+ 660              		@ sp needed
+ 661              	.LVL44:
+ 662              	.LVL45:
+ 663              	.LVL46:
+ 664              	.LVL47:
+ 665              	.LVL48:
+ 666              		.loc 1 317 1 view .LVU197
+ 667 0036 C0BC     		pop	{r6, r7}
+ 668 0038 B946     		mov	r9, r7
+ 669 003a B046     		mov	r8, r6
+ 670 003c F0BD     		pop	{r4, r5, r6, r7, pc}
+ 671              	.LVL49:
+ 672              	.L64:
+ 673              	.LBB11:
+ 674              	.LBB8:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 19
+
+
+ 291:services/crypto/jitter_rng.c ****             return JITTER_ERR_HEALTH;
+ 675              		.loc 1 291 13 is_stmt 1 view .LVU198
+ 676 003e 1021     		movs	r1, #16
+ 677 0040 08A8     		add	r0, sp, #32
+ 678 0042 FFF7FEFF 		bl	wipe
+ 679              	.LVL50:
+ 291:services/crypto/jitter_rng.c ****             return JITTER_ERR_HEALTH;
+ 680              		.loc 1 291 30 discriminator 1 view .LVU199
+ 681 0046 1021     		movs	r1, #16
+ 682 0048 04A8     		add	r0, sp, #16
+ 683 004a FFF7FEFF 		bl	wipe
+ 684              	.LVL51:
+ 292:services/crypto/jitter_rng.c ****         }
+ 685              		.loc 1 292 13 view .LVU200
+ 292:services/crypto/jitter_rng.c ****         }
+ 686              		.loc 1 292 20 is_stmt 0 view .LVU201
+ 687 004e 0225     		movs	r5, #2
+ 688              	.LVL52:
+ 292:services/crypto/jitter_rng.c ****         }
+ 689              		.loc 1 292 20 view .LVU202
+ 690 0050 EFE7     		b	.L57
+ 691              	.LVL53:
+ 692              	.L56:
+ 693              	.LBB6:
+ 305:services/crypto/jitter_rng.c ****                 aes128_encrypt_block(k_cond_key, state, state);   /* CBC-MAC step */
+ 694              		.loc 1 305 21 is_stmt 1 view .LVU203
+ 305:services/crypto/jitter_rng.c ****                 aes128_encrypt_block(k_cond_key, state, state);   /* CBC-MAC step */
+ 695              		.loc 1 305 26 is_stmt 0 view .LVU204
+ 696 0052 08A9     		add	r1, sp, #32
+ 697 0054 CA5C     		ldrb	r2, [r1, r3]
+ 305:services/crypto/jitter_rng.c ****                 aes128_encrypt_block(k_cond_key, state, state);   /* CBC-MAC step */
+ 698              		.loc 1 305 36 view .LVU205
+ 699 0056 04A8     		add	r0, sp, #16
+ 700 0058 C05C     		ldrb	r0, [r0, r3]
+ 305:services/crypto/jitter_rng.c ****                 aes128_encrypt_block(k_cond_key, state, state);   /* CBC-MAC step */
+ 701              		.loc 1 305 30 view .LVU206
+ 702 005a 4240     		eors	r2, r0
+ 703 005c CA54     		strb	r2, [r1, r3]
+ 304:services/crypto/jitter_rng.c ****                     state[i] ^= blk[i];
+ 704              		.loc 1 304 48 is_stmt 1 discriminator 3 view .LVU207
+ 705 005e 0133     		adds	r3, r3, #1
+ 706              	.LVL54:
+ 304:services/crypto/jitter_rng.c ****                     state[i] ^= blk[i];
+ 707              		.loc 1 304 48 is_stmt 0 discriminator 3 view .LVU208
+ 708 0060 DBB2     		uxtb	r3, r3
+ 709              	.LVL55:
+ 710              	.L55:
+ 304:services/crypto/jitter_rng.c ****                     state[i] ^= blk[i];
+ 711              		.loc 1 304 40 is_stmt 1 discriminator 1 view .LVU209
+ 712 0062 0F2B     		cmp	r3, #15
+ 713 0064 F5D9     		bls	.L56
+ 714              	.LBE6:
+ 306:services/crypto/jitter_rng.c ****             }
+ 715              		.loc 1 306 17 view .LVU210
+ 716 0066 08A9     		add	r1, sp, #32
+ 717 0068 2248     		ldr	r0, .L65
+ 718 006a 0A00     		movs	r2, r1
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 20
+
+
+ 719 006c FFF7FEFF 		bl	aes128_encrypt_block
+ 720              	.LVL56:
+ 303:services/crypto/jitter_rng.c ****                 for (uint8_t i = 0u; i < 16u; i++)
+ 721              		.loc 1 303 20 is_stmt 0 view .LVU211
+ 722 0070 019C     		ldr	r4, [sp, #4]
+ 723 0072 A046     		mov	r8, r4
+ 298:services/crypto/jitter_rng.c ****             blk[bi++] = acc;
+ 724              		.loc 1 298 18 view .LVU212
+ 725 0074 2600     		movs	r6, r4
+ 726              	.LVL57:
+ 727              	.L54:
+ 298:services/crypto/jitter_rng.c ****             blk[bi++] = acc;
+ 728              		.loc 1 298 18 view .LVU213
+ 729              	.LBE8:
+ 278:services/crypto/jitter_rng.c ****     {
+ 730              		.loc 1 278 58 is_stmt 1 discriminator 2 view .LVU214
+ 731 0076 0137     		adds	r7, r7, #1
+ 732              	.LVL58:
+ 278:services/crypto/jitter_rng.c ****     {
+ 733              		.loc 1 278 58 is_stmt 0 discriminator 2 view .LVU215
+ 734 0078 BFB2     		uxth	r7, r7
+ 735              	.LVL59:
+ 736              	.L50:
+ 278:services/crypto/jitter_rng.c ****     {
+ 737              		.loc 1 278 29 is_stmt 1 discriminator 1 view .LVU216
+ 738 007a 8023     		movs	r3, #128
+ 739 007c 5B01     		lsls	r3, r3, #5
+ 740 007e 9F42     		cmp	r7, r3
+ 741 0080 23D2     		bcs	.L62
+ 742              	.LBB9:
+ 280:services/crypto/jitter_rng.c ****         uint8_t r = next_delta(&d);
+ 743              		.loc 1 280 9 view .LVU217
+ 281:services/crypto/jitter_rng.c ****         if (r != JITTER_OK)
+ 744              		.loc 1 281 9 view .LVU218
+ 281:services/crypto/jitter_rng.c ****         if (r != JITTER_OK)
+ 745              		.loc 1 281 21 is_stmt 0 view .LVU219
+ 746 0082 02AB     		add	r3, sp, #8
+ 747 0084 981D     		adds	r0, r3, #6
+ 748 0086 FFF7FEFF 		bl	next_delta
+ 749              	.LVL60:
+ 750 008a 051E     		subs	r5, r0, #0
+ 751              	.LVL61:
+ 282:services/crypto/jitter_rng.c ****         {
+ 752              		.loc 1 282 9 is_stmt 1 view .LVU220
+ 282:services/crypto/jitter_rng.c ****         {
+ 753              		.loc 1 282 12 is_stmt 0 view .LVU221
+ 754 008c C9D1     		bne	.L63
+ 288:services/crypto/jitter_rng.c ****         if (health_feed(sym) != 0u)
+ 755              		.loc 1 288 9 is_stmt 1 view .LVU222
+ 288:services/crypto/jitter_rng.c ****         if (health_feed(sym) != 0u)
+ 756              		.loc 1 288 23 is_stmt 0 view .LVU223
+ 757 008e 02AB     		add	r3, sp, #8
+ 758 0090 9D79     		ldrb	r5, [r3, #6]
+ 288:services/crypto/jitter_rng.c ****         if (health_feed(sym) != 0u)
+ 759              		.loc 1 288 17 view .LVU224
+ 760 0092 0322     		movs	r2, #3
+ 761 0094 1540     		ands	r5, r2
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 21
+
+
+ 762              	.LVL62:
+ 289:services/crypto/jitter_rng.c ****         {
+ 763              		.loc 1 289 9 is_stmt 1 view .LVU225
+ 289:services/crypto/jitter_rng.c ****         {
+ 764              		.loc 1 289 13 is_stmt 0 view .LVU226
+ 765 0096 2800     		movs	r0, r5
+ 766              	.LVL63:
+ 289:services/crypto/jitter_rng.c ****         {
+ 767              		.loc 1 289 13 view .LVU227
+ 768 0098 FFF7FEFF 		bl	health_feed
+ 769              	.LVL64:
+ 770 009c 0190     		str	r0, [sp, #4]
+ 289:services/crypto/jitter_rng.c ****         {
+ 771              		.loc 1 289 12 discriminator 1 view .LVU228
+ 772 009e 0028     		cmp	r0, #0
+ 773 00a0 CDD1     		bne	.L64
+ 295:services/crypto/jitter_rng.c ****         if (++nsym == 4u)                            /* 4 symbols -> 1 byte */
+ 774              		.loc 1 295 9 is_stmt 1 view .LVU229
+ 775 00a2 A400     		lsls	r4, r4, #2
+ 776              	.LVL65:
+ 295:services/crypto/jitter_rng.c ****         if (++nsym == 4u)                            /* 4 symbols -> 1 byte */
+ 777              		.loc 1 295 9 is_stmt 0 view .LVU230
+ 778 00a4 E4B2     		uxtb	r4, r4
+ 295:services/crypto/jitter_rng.c ****         if (++nsym == 4u)                            /* 4 symbols -> 1 byte */
+ 779              		.loc 1 295 13 view .LVU231
+ 780 00a6 2C43     		orrs	r4, r5
+ 781              	.LVL66:
+ 296:services/crypto/jitter_rng.c ****         {
+ 782              		.loc 1 296 9 is_stmt 1 view .LVU232
+ 296:services/crypto/jitter_rng.c ****         {
+ 783              		.loc 1 296 12 is_stmt 0 view .LVU233
+ 784 00a8 0136     		adds	r6, r6, #1
+ 785              	.LVL67:
+ 296:services/crypto/jitter_rng.c ****         {
+ 786              		.loc 1 296 12 view .LVU234
+ 787 00aa F6B2     		uxtb	r6, r6
+ 788              	.LVL68:
+ 296:services/crypto/jitter_rng.c ****         {
+ 789              		.loc 1 296 12 view .LVU235
+ 790 00ac 042E     		cmp	r6, #4
+ 791 00ae E2D1     		bne	.L54
+ 298:services/crypto/jitter_rng.c ****             blk[bi++] = acc;
+ 792              		.loc 1 298 13 is_stmt 1 view .LVU236
+ 793              	.LVL69:
+ 299:services/crypto/jitter_rng.c ****             acc = 0u;
+ 794              		.loc 1 299 13 view .LVU237
+ 299:services/crypto/jitter_rng.c ****             acc = 0u;
+ 795              		.loc 1 299 19 is_stmt 0 view .LVU238
+ 796 00b0 4146     		mov	r1, r8
+ 797 00b2 4B1C     		adds	r3, r1, #1
+ 798 00b4 DBB2     		uxtb	r3, r3
+ 799              	.LVL70:
+ 299:services/crypto/jitter_rng.c ****             acc = 0u;
+ 800              		.loc 1 299 23 view .LVU239
+ 801 00b6 04AA     		add	r2, sp, #16
+ 802 00b8 5454     		strb	r4, [r2, r1]
+ 300:services/crypto/jitter_rng.c ****             if (bi == 16u)                           /* 64 symbols -> 1 AES block */
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 22
+
+
+ 803              		.loc 1 300 13 is_stmt 1 view .LVU240
+ 804              	.LVL71:
+ 301:services/crypto/jitter_rng.c ****             {
+ 805              		.loc 1 301 13 view .LVU241
+ 301:services/crypto/jitter_rng.c ****             {
+ 806              		.loc 1 301 16 is_stmt 0 view .LVU242
+ 807 00ba 102B     		cmp	r3, #16
+ 808 00bc 03D0     		beq	.L61
+ 299:services/crypto/jitter_rng.c ****             acc = 0u;
+ 809              		.loc 1 299 19 view .LVU243
+ 810 00be 9846     		mov	r8, r3
+ 298:services/crypto/jitter_rng.c ****             blk[bi++] = acc;
+ 811              		.loc 1 298 18 view .LVU244
+ 812 00c0 019C     		ldr	r4, [sp, #4]
+ 813 00c2 2600     		movs	r6, r4
+ 814 00c4 D7E7     		b	.L54
+ 815              	.L61:
+ 816              	.LBB7:
+ 304:services/crypto/jitter_rng.c ****                     state[i] ^= blk[i];
+ 817              		.loc 1 304 30 view .LVU245
+ 818 00c6 019B     		ldr	r3, [sp, #4]
+ 819              	.LVL72:
+ 304:services/crypto/jitter_rng.c ****                     state[i] ^= blk[i];
+ 820              		.loc 1 304 30 view .LVU246
+ 821 00c8 CBE7     		b	.L55
+ 822              	.LVL73:
+ 823              	.L62:
+ 304:services/crypto/jitter_rng.c ****                     state[i] ^= blk[i];
+ 824              		.loc 1 304 30 view .LVU247
+ 825              	.LBE7:
+ 826              	.LBE9:
+ 827              	.LBE11:
+ 828              	.LBB12:
+ 311:services/crypto/jitter_rng.c ****         out[i] = state[i];
+ 829              		.loc 1 311 18 view .LVU248
+ 830 00ca 0023     		movs	r3, #0
+ 831 00cc 05E0     		b	.L59
+ 832              	.LVL74:
+ 833              	.L60:
+ 312:services/crypto/jitter_rng.c **** 
+ 834              		.loc 1 312 9 is_stmt 1 view .LVU249
+ 312:services/crypto/jitter_rng.c **** 
+ 835              		.loc 1 312 23 is_stmt 0 view .LVU250
+ 836 00ce 08AA     		add	r2, sp, #32
+ 837 00d0 D25C     		ldrb	r2, [r2, r3]
+ 312:services/crypto/jitter_rng.c **** 
+ 838              		.loc 1 312 16 view .LVU251
+ 839 00d2 4946     		mov	r1, r9
+ 840 00d4 CA54     		strb	r2, [r1, r3]
+ 311:services/crypto/jitter_rng.c ****         out[i] = state[i];
+ 841              		.loc 1 311 36 is_stmt 1 discriminator 3 view .LVU252
+ 842 00d6 0133     		adds	r3, r3, #1
+ 843              	.LVL75:
+ 311:services/crypto/jitter_rng.c ****         out[i] = state[i];
+ 844              		.loc 1 311 36 is_stmt 0 discriminator 3 view .LVU253
+ 845 00d8 DBB2     		uxtb	r3, r3
+ 846              	.LVL76:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 23
+
+
+ 847              	.L59:
+ 311:services/crypto/jitter_rng.c ****         out[i] = state[i];
+ 848              		.loc 1 311 28 is_stmt 1 discriminator 1 view .LVU254
+ 849 00da 0F2B     		cmp	r3, #15
+ 850 00dc F7D9     		bls	.L60
+ 851              	.LBE12:
+ 314:services/crypto/jitter_rng.c ****     wipe(blk, 16);
+ 852              		.loc 1 314 5 view .LVU255
+ 853 00de 1021     		movs	r1, #16
+ 854 00e0 08A8     		add	r0, sp, #32
+ 855 00e2 FFF7FEFF 		bl	wipe
+ 856              	.LVL77:
+ 315:services/crypto/jitter_rng.c ****     return JITTER_OK;
+ 857              		.loc 1 315 5 view .LVU256
+ 858 00e6 1021     		movs	r1, #16
+ 859 00e8 04A8     		add	r0, sp, #16
+ 860 00ea FFF7FEFF 		bl	wipe
+ 861              	.LVL78:
+ 316:services/crypto/jitter_rng.c **** }
+ 862              		.loc 1 316 5 view .LVU257
+ 316:services/crypto/jitter_rng.c **** }
+ 863              		.loc 1 316 12 is_stmt 0 view .LVU258
+ 864 00ee 0025     		movs	r5, #0
+ 865 00f0 9FE7     		b	.L57
+ 866              	.L66:
+ 867 00f2 C046     		.align	2
+ 868              	.L65:
+ 869 00f4 00000000 		.word	k_cond_key
+ 870              		.cfi_endproc
+ 871              	.LFE46:
+ 873              		.section	.text.jitter_rng_init,"ax",%progbits
+ 874              		.align	1
+ 875              		.global	jitter_rng_init
+ 876              		.syntax unified
+ 877              		.code	16
+ 878              		.thumb_func
+ 880              	jitter_rng_init:
+ 881              	.LFB45:
+ 189:services/crypto/jitter_rng.c ****     uint32_t t;
+ 882              		.loc 1 189 1 is_stmt 1 view -0
+ 883              		.cfi_startproc
+ 884              		@ args = 0, pretend = 0, frame = 8
+ 885              		@ frame_needed = 0, uses_anonymous_args = 0
+ 886 0000 30B5     		push	{r4, r5, lr}
+ 887              	.LCFI4:
+ 888              		.cfi_def_cfa_offset 12
+ 889              		.cfi_offset 4, -12
+ 890              		.cfi_offset 5, -8
+ 891              		.cfi_offset 14, -4
+ 892 0002 83B0     		sub	sp, sp, #12
+ 893              	.LCFI5:
+ 894              		.cfi_def_cfa_offset 24
+ 190:services/crypto/jitter_rng.c ****     uint16_t d;
+ 895              		.loc 1 190 5 view .LVU260
+ 191:services/crypto/jitter_rng.c **** 
+ 896              		.loc 1 191 5 view .LVU261
+ 193:services/crypto/jitter_rng.c ****     s_failed = 0u;
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 24
+
+
+ 897              		.loc 1 193 5 view .LVU262
+ 193:services/crypto/jitter_rng.c ****     s_failed = 0u;
+ 898              		.loc 1 193 13 is_stmt 0 view .LVU263
+ 899 0004 4D4A     		ldr	r2, .L85
+ 900 0006 0023     		movs	r3, #0
+ 901 0008 1370     		strb	r3, [r2]
+ 194:services/crypto/jitter_rng.c ****     s_have_prev = 0u;
+ 902              		.loc 1 194 5 is_stmt 1 view .LVU264
+ 194:services/crypto/jitter_rng.c ****     s_have_prev = 0u;
+ 903              		.loc 1 194 14 is_stmt 0 view .LVU265
+ 904 000a 4D4A     		ldr	r2, .L85+4
+ 905 000c 1370     		strb	r3, [r2]
+ 195:services/crypto/jitter_rng.c ****     health_reset();
+ 906              		.loc 1 195 5 is_stmt 1 view .LVU266
+ 195:services/crypto/jitter_rng.c ****     health_reset();
+ 907              		.loc 1 195 17 is_stmt 0 view .LVU267
+ 908 000e 4D4A     		ldr	r2, .L85+8
+ 909 0010 1370     		strb	r3, [r2]
+ 196:services/crypto/jitter_rng.c **** 
+ 910              		.loc 1 196 5 is_stmt 1 view .LVU268
+ 911 0012 FFF7FEFF 		bl	health_reset
+ 912              	.LVL79:
+ 199:services/crypto/jitter_rng.c ****         return JITTER_ERR_INIT;
+ 913              		.loc 1 199 5 view .LVU269
+ 199:services/crypto/jitter_rng.c ****         return JITTER_ERR_INIT;
+ 914              		.loc 1 199 9 is_stmt 0 view .LVU270
+ 915 0016 FFF7FEFF 		bl	clock_48mhz_init
+ 916              	.LVL80:
+ 917 001a 051E     		subs	r5, r0, #0
+ 199:services/crypto/jitter_rng.c ****         return JITTER_ERR_INIT;
+ 918              		.loc 1 199 8 discriminator 1 view .LVU271
+ 919 001c 00D0     		beq	.LCB829
+ 920 001e 81E0     		b	.L77	@long jump
+ 921              	.LCB829:
+ 203:services/crypto/jitter_rng.c ****     PWR->CR |= PWR_CR_DBP;
+ 922              		.loc 1 203 5 is_stmt 1 view .LVU272
+ 203:services/crypto/jitter_rng.c ****     PWR->CR |= PWR_CR_DBP;
+ 923              		.loc 1 203 8 is_stmt 0 view .LVU273
+ 924 0020 494B     		ldr	r3, .L85+12
+ 925 0022 D969     		ldr	r1, [r3, #28]
+ 203:services/crypto/jitter_rng.c ****     PWR->CR |= PWR_CR_DBP;
+ 926              		.loc 1 203 18 view .LVU274
+ 927 0024 494A     		ldr	r2, .L85+16
+ 928 0026 0A43     		orrs	r2, r1
+ 929 0028 DA61     		str	r2, [r3, #28]
+ 204:services/crypto/jitter_rng.c **** 
+ 930              		.loc 1 204 5 is_stmt 1 view .LVU275
+ 204:services/crypto/jitter_rng.c **** 
+ 931              		.loc 1 204 8 is_stmt 0 view .LVU276
+ 932 002a 4949     		ldr	r1, .L85+20
+ 933 002c 0C68     		ldr	r4, [r1]
+ 204:services/crypto/jitter_rng.c **** 
+ 934              		.loc 1 204 13 view .LVU277
+ 935 002e 8022     		movs	r2, #128
+ 936 0030 5200     		lsls	r2, r2, #1
+ 937 0032 2243     		orrs	r2, r4
+ 938 0034 0A60     		str	r2, [r1]
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 25
+
+
+ 207:services/crypto/jitter_rng.c ****     t = JITTER_LSI_START_SPINS;
+ 939              		.loc 1 207 5 is_stmt 1 view .LVU278
+ 207:services/crypto/jitter_rng.c ****     t = JITTER_LSI_START_SPINS;
+ 940              		.loc 1 207 8 is_stmt 0 view .LVU279
+ 941 0036 5A6A     		ldr	r2, [r3, #36]
+ 207:services/crypto/jitter_rng.c ****     t = JITTER_LSI_START_SPINS;
+ 942              		.loc 1 207 14 view .LVU280
+ 943 0038 0121     		movs	r1, #1
+ 944 003a 0A43     		orrs	r2, r1
+ 945 003c 5A62     		str	r2, [r3, #36]
+ 208:services/crypto/jitter_rng.c ****     while ((RCC->CSR & RCC_CSR_LSIRDY) == 0u)
+ 946              		.loc 1 208 5 is_stmt 1 view .LVU281
+ 947              	.LVL81:
+ 209:services/crypto/jitter_rng.c ****     {
+ 948              		.loc 1 209 5 view .LVU282
+ 208:services/crypto/jitter_rng.c ****     while ((RCC->CSR & RCC_CSR_LSIRDY) == 0u)
+ 949              		.loc 1 208 7 is_stmt 0 view .LVU283
+ 950 003e 454A     		ldr	r2, .L85+24
+ 951              	.LVL82:
+ 952              	.L69:
+ 209:services/crypto/jitter_rng.c ****     {
+ 953              		.loc 1 209 40 is_stmt 1 view .LVU284
+ 209:services/crypto/jitter_rng.c ****     {
+ 954              		.loc 1 209 16 is_stmt 0 view .LVU285
+ 955 0040 414B     		ldr	r3, .L85+12
+ 956 0042 5B6A     		ldr	r3, [r3, #36]
+ 209:services/crypto/jitter_rng.c ****     {
+ 957              		.loc 1 209 40 view .LVU286
+ 958 0044 9B07     		lsls	r3, r3, #30
+ 959 0046 09D4     		bmi	.L82
+ 211:services/crypto/jitter_rng.c ****         {
+ 960              		.loc 1 211 9 is_stmt 1 view .LVU287
+ 211:services/crypto/jitter_rng.c ****         {
+ 961              		.loc 1 211 12 is_stmt 0 view .LVU288
+ 962 0048 013A     		subs	r2, r2, #1
+ 963              	.LVL83:
+ 211:services/crypto/jitter_rng.c ****         {
+ 964              		.loc 1 211 12 view .LVU289
+ 965 004a 002A     		cmp	r2, #0
+ 966 004c F8D1     		bne	.L69
+ 213:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 967              		.loc 1 213 13 is_stmt 1 view .LVU290
+ 213:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 968              		.loc 1 213 16 is_stmt 0 view .LVU291
+ 969 004e 404A     		ldr	r2, .L85+20
+ 970              	.LVL84:
+ 213:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 971              		.loc 1 213 16 view .LVU292
+ 972 0050 1368     		ldr	r3, [r2]
+ 213:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 973              		.loc 1 213 21 view .LVU293
+ 974 0052 4149     		ldr	r1, .L85+28
+ 975 0054 0B40     		ands	r3, r1
+ 976 0056 1360     		str	r3, [r2]
+ 214:services/crypto/jitter_rng.c ****         }
+ 977              		.loc 1 214 13 is_stmt 1 view .LVU294
+ 214:services/crypto/jitter_rng.c ****         }
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 26
+
+
+ 978              		.loc 1 214 20 is_stmt 0 view .LVU295
+ 979 0058 0125     		movs	r5, #1
+ 980 005a 64E0     		b	.L68
+ 981              	.LVL85:
+ 982              	.L82:
+ 983              	.LBB13:
+ 221:services/crypto/jitter_rng.c ****         if (sel == 0u)
+ 984              		.loc 1 221 9 is_stmt 1 view .LVU296
+ 221:services/crypto/jitter_rng.c ****         if (sel == 0u)
+ 985              		.loc 1 221 27 is_stmt 0 view .LVU297
+ 986 005c 3A4B     		ldr	r3, .L85+12
+ 987 005e 1A6A     		ldr	r2, [r3, #32]
+ 988              	.LVL86:
+ 221:services/crypto/jitter_rng.c ****         if (sel == 0u)
+ 989              		.loc 1 221 18 view .LVU298
+ 990 0060 C023     		movs	r3, #192
+ 991 0062 9B00     		lsls	r3, r3, #2
+ 992 0064 1100     		movs	r1, r2
+ 993 0066 1940     		ands	r1, r3
+ 994              	.LVL87:
+ 222:services/crypto/jitter_rng.c ****             RCC->BDCR |= RCC_BDCR_RTCSEL_1;          /* 10 = LSI */
+ 995              		.loc 1 222 9 is_stmt 1 view .LVU299
+ 222:services/crypto/jitter_rng.c ****             RCC->BDCR |= RCC_BDCR_RTCSEL_1;          /* 10 = LSI */
+ 996              		.loc 1 222 12 is_stmt 0 view .LVU300
+ 997 0068 1A42     		tst	r2, r3
+ 998 006a 33D1     		bne	.L71
+ 223:services/crypto/jitter_rng.c ****         else if (sel != RCC_BDCR_RTCSEL_1)
+ 999              		.loc 1 223 13 is_stmt 1 view .LVU301
+ 223:services/crypto/jitter_rng.c ****         else if (sel != RCC_BDCR_RTCSEL_1)
+ 1000              		.loc 1 223 16 is_stmt 0 view .LVU302
+ 1001 006c 364A     		ldr	r2, .L85+12
+ 1002 006e 116A     		ldr	r1, [r2, #32]
+ 1003              	.LVL88:
+ 223:services/crypto/jitter_rng.c ****         else if (sel != RCC_BDCR_RTCSEL_1)
+ 1004              		.loc 1 223 23 view .LVU303
+ 1005 0070 013B     		subs	r3, r3, #1
+ 1006 0072 FF3B     		subs	r3, r3, #255
+ 1007 0074 0B43     		orrs	r3, r1
+ 1008 0076 1362     		str	r3, [r2, #32]
+ 1009              	.L72:
+ 229:services/crypto/jitter_rng.c ****     }
+ 1010              		.loc 1 229 9 is_stmt 1 view .LVU304
+ 229:services/crypto/jitter_rng.c ****     }
+ 1011              		.loc 1 229 12 is_stmt 0 view .LVU305
+ 1012 0078 334A     		ldr	r2, .L85+12
+ 1013 007a 116A     		ldr	r1, [r2, #32]
+ 229:services/crypto/jitter_rng.c ****     }
+ 1014              		.loc 1 229 19 view .LVU306
+ 1015 007c 8023     		movs	r3, #128
+ 1016 007e 1B02     		lsls	r3, r3, #8
+ 1017 0080 0B43     		orrs	r3, r1
+ 1018 0082 1362     		str	r3, [r2, #32]
+ 1019              	.LBE13:
+ 234:services/crypto/jitter_rng.c **** 
+ 1020              		.loc 1 234 5 is_stmt 1 view .LVU307
+ 234:services/crypto/jitter_rng.c **** 
+ 1021              		.loc 1 234 8 is_stmt 0 view .LVU308
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 27
+
+
+ 1022 0084 324A     		ldr	r2, .L85+20
+ 1023 0086 1368     		ldr	r3, [r2]
+ 234:services/crypto/jitter_rng.c **** 
+ 1024              		.loc 1 234 13 view .LVU309
+ 1025 0088 3349     		ldr	r1, .L85+28
+ 1026 008a 0B40     		ands	r3, r1
+ 1027 008c 1360     		str	r3, [r2]
+ 237:services/crypto/jitter_rng.c ****     TIM14->OR    = TIM14_OR_TI1_RMP_0;               /* 01: TI1 <- RTC_CLK */
+ 1028              		.loc 1 237 5 is_stmt 1 view .LVU310
+ 237:services/crypto/jitter_rng.c ****     TIM14->OR    = TIM14_OR_TI1_RMP_0;               /* 01: TI1 <- RTC_CLK */
+ 1029              		.loc 1 237 18 is_stmt 0 view .LVU311
+ 1030 008e 334B     		ldr	r3, .L85+32
+ 1031 0090 0021     		movs	r1, #0
+ 1032 0092 1960     		str	r1, [r3]
+ 238:services/crypto/jitter_rng.c ****     TIM14->PSC   = 0u;
+ 1033              		.loc 1 238 5 is_stmt 1 view .LVU312
+ 238:services/crypto/jitter_rng.c ****     TIM14->PSC   = 0u;
+ 1034              		.loc 1 238 18 is_stmt 0 view .LVU313
+ 1035 0094 0122     		movs	r2, #1
+ 1036 0096 1A65     		str	r2, [r3, #80]
+ 239:services/crypto/jitter_rng.c ****     TIM14->ARR   = 0xFFFFu;
+ 1037              		.loc 1 239 5 is_stmt 1 view .LVU314
+ 239:services/crypto/jitter_rng.c ****     TIM14->ARR   = 0xFFFFu;
+ 1038              		.loc 1 239 18 is_stmt 0 view .LVU315
+ 1039 0098 9962     		str	r1, [r3, #40]
+ 240:services/crypto/jitter_rng.c ****     TIM14->CCMR1 = TIM_CCMR1_CC1S_0;                 /* CC1 = input on TI1, no filter, no prescaler
+ 1040              		.loc 1 240 5 is_stmt 1 view .LVU316
+ 240:services/crypto/jitter_rng.c ****     TIM14->CCMR1 = TIM_CCMR1_CC1S_0;                 /* CC1 = input on TI1, no filter, no prescaler
+ 1041              		.loc 1 240 18 is_stmt 0 view .LVU317
+ 1042 009a 314C     		ldr	r4, .L85+36
+ 1043 009c DC62     		str	r4, [r3, #44]
+ 241:services/crypto/jitter_rng.c ****     TIM14->CCER  = TIM_CCER_CC1E;                    /* rising edge, capture enabled */
+ 1044              		.loc 1 241 5 is_stmt 1 view .LVU318
+ 241:services/crypto/jitter_rng.c ****     TIM14->CCER  = TIM_CCER_CC1E;                    /* rising edge, capture enabled */
+ 1045              		.loc 1 241 18 is_stmt 0 view .LVU319
+ 1046 009e 9A61     		str	r2, [r3, #24]
+ 242:services/crypto/jitter_rng.c ****     TIM14->EGR   = TIM_EGR_UG;
+ 1047              		.loc 1 242 5 is_stmt 1 view .LVU320
+ 242:services/crypto/jitter_rng.c ****     TIM14->EGR   = TIM_EGR_UG;
+ 1048              		.loc 1 242 18 is_stmt 0 view .LVU321
+ 1049 00a0 1A62     		str	r2, [r3, #32]
+ 243:services/crypto/jitter_rng.c ****     TIM14->SR    = 0u;
+ 1050              		.loc 1 243 5 is_stmt 1 view .LVU322
+ 243:services/crypto/jitter_rng.c ****     TIM14->SR    = 0u;
+ 1051              		.loc 1 243 18 is_stmt 0 view .LVU323
+ 1052 00a2 5A61     		str	r2, [r3, #20]
+ 244:services/crypto/jitter_rng.c ****     TIM14->CR1   = TIM_CR1_CEN;
+ 1053              		.loc 1 244 5 is_stmt 1 view .LVU324
+ 244:services/crypto/jitter_rng.c ****     TIM14->CR1   = TIM_CR1_CEN;
+ 1054              		.loc 1 244 18 is_stmt 0 view .LVU325
+ 1055 00a4 1961     		str	r1, [r3, #16]
+ 245:services/crypto/jitter_rng.c **** 
+ 1056              		.loc 1 245 5 is_stmt 1 view .LVU326
+ 245:services/crypto/jitter_rng.c **** 
+ 1057              		.loc 1 245 18 is_stmt 0 view .LVU327
+ 1058 00a6 1A60     		str	r2, [r3]
+ 248:services/crypto/jitter_rng.c ****     {
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 28
+
+
+ 1059              		.loc 1 248 5 is_stmt 1 view .LVU328
+ 1060              	.LBB14:
+ 248:services/crypto/jitter_rng.c ****     {
+ 1061              		.loc 1 248 10 view .LVU329
+ 1062              	.LVL89:
+ 248:services/crypto/jitter_rng.c ****     {
+ 1063              		.loc 1 248 18 is_stmt 0 view .LVU330
+ 1064 00a8 0400     		movs	r4, r0
+ 1065              	.LVL90:
+ 1066              	.L73:
+ 248:services/crypto/jitter_rng.c ****     {
+ 1067              		.loc 1 248 28 is_stmt 1 discriminator 1 view .LVU331
+ 1068 00aa 1F2C     		cmp	r4, #31
+ 1069 00ac 1DD8     		bhi	.L83
+ 250:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1070              		.loc 1 250 9 view .LVU332
+ 250:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1071              		.loc 1 250 13 is_stmt 0 view .LVU333
+ 1072 00ae 6B46     		mov	r3, sp
+ 1073 00b0 981D     		adds	r0, r3, #6
+ 1074 00b2 FFF7FEFF 		bl	next_delta
+ 1075              	.LVL91:
+ 250:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1076              		.loc 1 250 12 discriminator 1 view .LVU334
+ 1077 00b6 0028     		cmp	r0, #0
+ 1078 00b8 38D1     		bne	.L78
+ 252:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1079              		.loc 1 252 9 is_stmt 1 view .LVU335
+ 252:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1080              		.loc 1 252 34 is_stmt 0 view .LVU336
+ 1081 00ba 6B46     		mov	r3, sp
+ 1082 00bc 0633     		adds	r3, r3, #6
+ 1083 00be 1B88     		ldrh	r3, [r3]
+ 1084 00c0 913B     		subs	r3, r3, #145
+ 1085 00c2 FF3B     		subs	r3, r3, #255
+ 1086 00c4 9BB2     		uxth	r3, r3
+ 252:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1087              		.loc 1 252 12 view .LVU337
+ 1088 00c6 AF22     		movs	r2, #175
+ 1089 00c8 1201     		lsls	r2, r2, #4
+ 1090 00ca 9342     		cmp	r3, r2
+ 1091 00cc 30D8     		bhi	.L79
+ 248:services/crypto/jitter_rng.c ****     {
+ 1092              		.loc 1 248 36 is_stmt 1 discriminator 2 view .LVU338
+ 1093 00ce 0134     		adds	r4, r4, #1
+ 1094              	.LVL92:
+ 248:services/crypto/jitter_rng.c ****     {
+ 1095              		.loc 1 248 36 is_stmt 0 discriminator 2 view .LVU339
+ 1096 00d0 E4B2     		uxtb	r4, r4
+ 1097              	.LVL93:
+ 248:services/crypto/jitter_rng.c ****     {
+ 1098              		.loc 1 248 36 discriminator 2 view .LVU340
+ 1099 00d2 EAE7     		b	.L73
+ 1100              	.LVL94:
+ 1101              	.L71:
+ 248:services/crypto/jitter_rng.c ****     {
+ 1102              		.loc 1 248 36 discriminator 2 view .LVU341
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 29
+
+
+ 1103              	.LBE14:
+ 1104              	.LBB15:
+ 224:services/crypto/jitter_rng.c ****         {
+ 1105              		.loc 1 224 14 is_stmt 1 view .LVU342
+ 224:services/crypto/jitter_rng.c ****         {
+ 1106              		.loc 1 224 17 is_stmt 0 view .LVU343
+ 1107 00d4 8023     		movs	r3, #128
+ 1108 00d6 9B00     		lsls	r3, r3, #2
+ 1109 00d8 9942     		cmp	r1, r3
+ 1110 00da CDD0     		beq	.L72
+ 226:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1111              		.loc 1 226 13 is_stmt 1 view .LVU344
+ 226:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1112              		.loc 1 226 16 is_stmt 0 view .LVU345
+ 1113 00dc 1C4A     		ldr	r2, .L85+20
+ 1114 00de 1368     		ldr	r3, [r2]
+ 226:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1115              		.loc 1 226 21 view .LVU346
+ 1116 00e0 1D49     		ldr	r1, .L85+28
+ 1117              	.LVL95:
+ 226:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1118              		.loc 1 226 21 view .LVU347
+ 1119 00e2 0B40     		ands	r3, r1
+ 1120 00e4 1360     		str	r3, [r2]
+ 227:services/crypto/jitter_rng.c ****         }
+ 1121              		.loc 1 227 13 is_stmt 1 view .LVU348
+ 227:services/crypto/jitter_rng.c ****         }
+ 1122              		.loc 1 227 20 is_stmt 0 view .LVU349
+ 1123 00e6 0125     		movs	r5, #1
+ 1124 00e8 1DE0     		b	.L68
+ 1125              	.LVL96:
+ 1126              	.L83:
+ 227:services/crypto/jitter_rng.c ****         }
+ 1127              		.loc 1 227 20 view .LVU350
+ 1128              	.LBE15:
+ 258:services/crypto/jitter_rng.c ****     for (uint16_t n = 0u; n < JITTER_STARTUP_SAMPLES; n++)
+ 1129              		.loc 1 258 5 is_stmt 1 view .LVU351
+ 1130 00ea FFF7FEFF 		bl	health_reset
+ 1131              	.LVL97:
+ 259:services/crypto/jitter_rng.c ****     {
+ 1132              		.loc 1 259 5 view .LVU352
+ 1133              	.LBB16:
+ 259:services/crypto/jitter_rng.c ****     {
+ 1134              		.loc 1 259 10 view .LVU353
+ 259:services/crypto/jitter_rng.c ****     {
+ 1135              		.loc 1 259 19 is_stmt 0 view .LVU354
+ 1136 00ee 0024     		movs	r4, #0
+ 1137              	.LVL98:
+ 1138              	.L75:
+ 259:services/crypto/jitter_rng.c ****     {
+ 1139              		.loc 1 259 29 is_stmt 1 discriminator 1 view .LVU355
+ 1140 00f0 8023     		movs	r3, #128
+ 1141 00f2 DB00     		lsls	r3, r3, #3
+ 1142 00f4 9C42     		cmp	r4, r3
+ 1143 00f6 11D2     		bcs	.L84
+ 261:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1144              		.loc 1 261 9 view .LVU356
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 30
+
+
+ 261:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1145              		.loc 1 261 13 is_stmt 0 view .LVU357
+ 1146 00f8 6B46     		mov	r3, sp
+ 1147 00fa 981D     		adds	r0, r3, #6
+ 1148 00fc FFF7FEFF 		bl	next_delta
+ 1149              	.LVL99:
+ 261:services/crypto/jitter_rng.c ****             return JITTER_ERR_INIT;
+ 1150              		.loc 1 261 12 discriminator 1 view .LVU358
+ 1151 0100 0028     		cmp	r0, #0
+ 1152 0102 17D1     		bne	.L80
+ 263:services/crypto/jitter_rng.c ****             return JITTER_ERR_HEALTH;
+ 1153              		.loc 1 263 9 is_stmt 1 view .LVU359
+ 263:services/crypto/jitter_rng.c ****             return JITTER_ERR_HEALTH;
+ 1154              		.loc 1 263 25 is_stmt 0 view .LVU360
+ 1155 0104 6B46     		mov	r3, sp
+ 1156 0106 0633     		adds	r3, r3, #6
+ 1157 0108 1B78     		ldrb	r3, [r3]
+ 263:services/crypto/jitter_rng.c ****             return JITTER_ERR_HEALTH;
+ 1158              		.loc 1 263 13 view .LVU361
+ 1159 010a 0330     		adds	r0, r0, #3
+ 1160 010c 1840     		ands	r0, r3
+ 1161 010e FFF7FEFF 		bl	health_feed
+ 1162              	.LVL100:
+ 263:services/crypto/jitter_rng.c ****             return JITTER_ERR_HEALTH;
+ 1163              		.loc 1 263 12 discriminator 1 view .LVU362
+ 1164 0112 0028     		cmp	r0, #0
+ 1165 0114 10D1     		bne	.L81
+ 259:services/crypto/jitter_rng.c ****     {
+ 1166              		.loc 1 259 56 is_stmt 1 discriminator 2 view .LVU363
+ 1167 0116 0134     		adds	r4, r4, #1
+ 1168              	.LVL101:
+ 259:services/crypto/jitter_rng.c ****     {
+ 1169              		.loc 1 259 56 is_stmt 0 discriminator 2 view .LVU364
+ 1170 0118 A4B2     		uxth	r4, r4
+ 1171              	.LVL102:
+ 259:services/crypto/jitter_rng.c ****     {
+ 1172              		.loc 1 259 56 discriminator 2 view .LVU365
+ 1173 011a E9E7     		b	.L75
+ 1174              	.LVL103:
+ 1175              	.L84:
+ 259:services/crypto/jitter_rng.c ****     {
+ 1176              		.loc 1 259 56 discriminator 2 view .LVU366
+ 1177              	.LBE16:
+ 267:services/crypto/jitter_rng.c ****     return JITTER_OK;
+ 1178              		.loc 1 267 5 is_stmt 1 view .LVU367
+ 267:services/crypto/jitter_rng.c ****     return JITTER_OK;
+ 1179              		.loc 1 267 13 is_stmt 0 view .LVU368
+ 1180 011c 074B     		ldr	r3, .L85
+ 1181 011e 0122     		movs	r2, #1
+ 1182 0120 1A70     		strb	r2, [r3]
+ 268:services/crypto/jitter_rng.c **** }
+ 1183              		.loc 1 268 5 is_stmt 1 view .LVU369
+ 268:services/crypto/jitter_rng.c **** }
+ 1184              		.loc 1 268 12 is_stmt 0 view .LVU370
+ 1185 0122 00E0     		b	.L68
+ 1186              	.LVL104:
+ 1187              	.L77:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 31
+
+
+ 200:services/crypto/jitter_rng.c **** 
+ 1188              		.loc 1 200 16 view .LVU371
+ 1189 0124 0125     		movs	r5, #1
+ 1190              	.L68:
+ 269:services/crypto/jitter_rng.c **** 
+ 1191              		.loc 1 269 1 view .LVU372
+ 1192 0126 2800     		movs	r0, r5
+ 1193 0128 03B0     		add	sp, sp, #12
+ 1194              		@ sp needed
+ 1195 012a 30BD     		pop	{r4, r5, pc}
+ 1196              	.LVL105:
+ 1197              	.L78:
+ 1198              	.LBB17:
+ 251:services/crypto/jitter_rng.c ****         if (d < JITTER_DELTA_MIN || d > JITTER_DELTA_MAX)
+ 1199              		.loc 1 251 20 view .LVU373
+ 1200 012c 0125     		movs	r5, #1
+ 1201 012e FAE7     		b	.L68
+ 1202              	.L79:
+ 253:services/crypto/jitter_rng.c ****     }
+ 1203              		.loc 1 253 20 view .LVU374
+ 1204 0130 0125     		movs	r5, #1
+ 1205 0132 F8E7     		b	.L68
+ 1206              	.LVL106:
+ 1207              	.L80:
+ 253:services/crypto/jitter_rng.c ****     }
+ 1208              		.loc 1 253 20 view .LVU375
+ 1209              	.LBE17:
+ 1210              	.LBB18:
+ 262:services/crypto/jitter_rng.c ****         if (health_feed((uint8_t)(d & JITTER_SYMBOL_MASK)) != 0u)
+ 1211              		.loc 1 262 20 view .LVU376
+ 1212 0134 0125     		movs	r5, #1
+ 1213 0136 F6E7     		b	.L68
+ 1214              	.L81:
+ 264:services/crypto/jitter_rng.c ****     }
+ 1215              		.loc 1 264 20 view .LVU377
+ 1216 0138 0225     		movs	r5, #2
+ 1217 013a F4E7     		b	.L68
+ 1218              	.L86:
+ 1219              		.align	2
+ 1220              	.L85:
+ 1221 013c 00000000 		.word	s_ready
+ 1222 0140 00000000 		.word	s_failed
+ 1223 0144 00000000 		.word	s_have_prev
+ 1224 0148 00100240 		.word	1073876992
+ 1225 014c 00010010 		.word	268435712
+ 1226 0150 00700040 		.word	1073770496
+ 1227 0154 A0860100 		.word	100000
+ 1228 0158 FFFEFFFF 		.word	-257
+ 1229 015c 00200040 		.word	1073750016
+ 1230 0160 FFFF0000 		.word	65535
+ 1231              	.LBE18:
+ 1232              		.cfi_endproc
+ 1233              	.LFE45:
+ 1235              		.section	.text.jitter_rng_fill,"ax",%progbits
+ 1236              		.align	1
+ 1237              		.global	jitter_rng_fill
+ 1238              		.syntax unified
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 32
+
+
+ 1239              		.code	16
+ 1240              		.thumb_func
+ 1242              	jitter_rng_fill:
+ 1243              	.LVL107:
+ 1244              	.LFB47:
+ 318:services/crypto/jitter_rng.c **** 
+ 319:services/crypto/jitter_rng.c **** /* ---- public: conditioned random bytes ----------------------------------- */
+ 320:services/crypto/jitter_rng.c **** uint8_t jitter_rng_fill(uint8_t *buf, uint8_t len)
+ 321:services/crypto/jitter_rng.c **** {
+ 1245              		.loc 1 321 1 is_stmt 1 view -0
+ 1246              		.cfi_startproc
+ 1247              		@ args = 0, pretend = 0, frame = 24
+ 1248              		@ frame_needed = 0, uses_anonymous_args = 0
+ 1249              		.loc 1 321 1 is_stmt 0 view .LVU379
+ 1250 0000 F0B5     		push	{r4, r5, r6, r7, lr}
+ 1251              	.LCFI6:
+ 1252              		.cfi_def_cfa_offset 20
+ 1253              		.cfi_offset 4, -20
+ 1254              		.cfi_offset 5, -16
+ 1255              		.cfi_offset 6, -12
+ 1256              		.cfi_offset 7, -8
+ 1257              		.cfi_offset 14, -4
+ 1258 0002 87B0     		sub	sp, sp, #28
+ 1259              	.LCFI7:
+ 1260              		.cfi_def_cfa_offset 48
+ 1261 0004 0700     		movs	r7, r0
+ 1262 0006 0E00     		movs	r6, r1
+ 322:services/crypto/jitter_rng.c ****     uint8_t blk[16];
+ 1263              		.loc 1 322 5 is_stmt 1 view .LVU380
+ 323:services/crypto/jitter_rng.c **** 
+ 324:services/crypto/jitter_rng.c ****     if (buf == 0 || s_ready == 0u)
+ 1264              		.loc 1 324 5 view .LVU381
+ 1265              		.loc 1 324 8 is_stmt 0 view .LVU382
+ 1266 0008 0028     		cmp	r0, #0
+ 1267 000a 35D0     		beq	.L96
+ 1268              		.loc 1 324 29 discriminator 1 view .LVU383
+ 1269 000c 1D4B     		ldr	r3, .L99
+ 1270 000e 1B78     		ldrb	r3, [r3]
+ 1271              		.loc 1 324 18 discriminator 1 view .LVU384
+ 1272 0010 002B     		cmp	r3, #0
+ 1273 0012 33D0     		beq	.L97
+ 325:services/crypto/jitter_rng.c ****         return JITTER_ERR_INIT;
+ 326:services/crypto/jitter_rng.c ****     if (s_failed != 0u)
+ 1274              		.loc 1 326 5 is_stmt 1 view .LVU385
+ 1275              		.loc 1 326 18 is_stmt 0 view .LVU386
+ 1276 0014 1C4B     		ldr	r3, .L99+4
+ 1277 0016 1D78     		ldrb	r5, [r3]
+ 1278              		.loc 1 326 8 view .LVU387
+ 1279 0018 002D     		cmp	r5, #0
+ 1280 001a 30D1     		bne	.L88
+ 1281              	.LBB19:
+ 327:services/crypto/jitter_rng.c ****         return s_failed;
+ 328:services/crypto/jitter_rng.c **** 
+ 329:services/crypto/jitter_rng.c ****     for (uint16_t off = 0u; off < len; off += 16u)   /* uint16_t: off += 16 would wrap at 240 */
+ 1282              		.loc 1 329 19 view .LVU388
+ 1283 001c 0024     		movs	r4, #0
+ 1284 001e 15E0     		b	.L89
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 33
+
+
+ 1285              	.LVL108:
+ 1286              	.L92:
+ 1287              	.LBB20:
+ 1288              	.LBB21:
+ 330:services/crypto/jitter_rng.c ****     {
+ 331:services/crypto/jitter_rng.c ****         uint8_t r = make_block(blk);
+ 332:services/crypto/jitter_rng.c ****         if (r != JITTER_OK)
+ 333:services/crypto/jitter_rng.c ****         {
+ 334:services/crypto/jitter_rng.c ****             s_failed = r;                            /* latch: FR-07, no key from a failing source 
+ 335:services/crypto/jitter_rng.c ****             wipe(blk, 16);                           /* may still hold the previous block */
+ 336:services/crypto/jitter_rng.c ****             for (uint16_t i = 0u; i < len; i++)
+ 337:services/crypto/jitter_rng.c ****                 buf[i] = 0u;
+ 1289              		.loc 1 337 17 is_stmt 1 view .LVU389
+ 1290              		.loc 1 337 20 is_stmt 0 view .LVU390
+ 1291 0020 FA18     		adds	r2, r7, r3
+ 1292              		.loc 1 337 24 view .LVU391
+ 1293 0022 0021     		movs	r1, #0
+ 1294 0024 1170     		strb	r1, [r2]
+ 336:services/crypto/jitter_rng.c ****                 buf[i] = 0u;
+ 1295              		.loc 1 336 45 is_stmt 1 discriminator 3 view .LVU392
+ 1296 0026 0133     		adds	r3, r3, #1
+ 1297              	.LVL109:
+ 336:services/crypto/jitter_rng.c ****                 buf[i] = 0u;
+ 1298              		.loc 1 336 45 is_stmt 0 discriminator 3 view .LVU393
+ 1299 0028 9BB2     		uxth	r3, r3
+ 1300              	.LVL110:
+ 1301              	.L91:
+ 336:services/crypto/jitter_rng.c ****                 buf[i] = 0u;
+ 1302              		.loc 1 336 37 is_stmt 1 discriminator 1 view .LVU394
+ 1303 002a 009A     		ldr	r2, [sp]
+ 1304 002c 9A42     		cmp	r2, r3
+ 1305 002e F7D8     		bhi	.L92
+ 1306              	.LBE21:
+ 338:services/crypto/jitter_rng.c ****             return r;
+ 1307              		.loc 1 338 20 is_stmt 0 view .LVU395
+ 1308 0030 019D     		ldr	r5, [sp, #4]
+ 1309 0032 24E0     		b	.L88
+ 1310              	.LVL111:
+ 1311              	.L94:
+ 1312              	.LBB22:
+ 339:services/crypto/jitter_rng.c ****         }
+ 340:services/crypto/jitter_rng.c ****         for (uint8_t j = 0u; j < 16u && (off + j) < len; j++)
+ 341:services/crypto/jitter_rng.c ****             buf[off + j] = blk[j];
+ 1313              		.loc 1 341 13 is_stmt 1 view .LVU396
+ 1314              		.loc 1 341 31 is_stmt 0 view .LVU397
+ 1315 0034 02A9     		add	r1, sp, #8
+ 1316 0036 C95C     		ldrb	r1, [r1, r3]
+ 1317              		.loc 1 341 26 view .LVU398
+ 1318 0038 B954     		strb	r1, [r7, r2]
+ 340:services/crypto/jitter_rng.c ****             buf[off + j] = blk[j];
+ 1319              		.loc 1 340 59 is_stmt 1 discriminator 4 view .LVU399
+ 1320 003a 0133     		adds	r3, r3, #1
+ 1321              	.LVL112:
+ 340:services/crypto/jitter_rng.c ****             buf[off + j] = blk[j];
+ 1322              		.loc 1 340 59 is_stmt 0 discriminator 4 view .LVU400
+ 1323 003c DBB2     		uxtb	r3, r3
+ 1324              	.LVL113:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 34
+
+
+ 1325              	.L90:
+ 340:services/crypto/jitter_rng.c ****             buf[off + j] = blk[j];
+ 1326              		.loc 1 340 38 is_stmt 1 discriminator 1 view .LVU401
+ 1327 003e 0F2B     		cmp	r3, #15
+ 1328 0040 02D8     		bhi	.L93
+ 340:services/crypto/jitter_rng.c ****             buf[off + j] = blk[j];
+ 1329              		.loc 1 340 46 is_stmt 0 discriminator 3 view .LVU402
+ 1330 0042 E218     		adds	r2, r4, r3
+ 340:services/crypto/jitter_rng.c ****             buf[off + j] = blk[j];
+ 1331              		.loc 1 340 38 discriminator 3 view .LVU403
+ 1332 0044 B242     		cmp	r2, r6
+ 1333 0046 F5DB     		blt	.L94
+ 1334              	.L93:
+ 1335              	.LBE22:
+ 1336              	.LBE20:
+ 329:services/crypto/jitter_rng.c ****     {
+ 1337              		.loc 1 329 44 is_stmt 1 discriminator 2 view .LVU404
+ 1338 0048 1034     		adds	r4, r4, #16
+ 1339              	.LVL114:
+ 329:services/crypto/jitter_rng.c ****     {
+ 1340              		.loc 1 329 44 is_stmt 0 discriminator 2 view .LVU405
+ 1341 004a A4B2     		uxth	r4, r4
+ 1342              	.LVL115:
+ 1343              	.L89:
+ 329:services/crypto/jitter_rng.c ****     {
+ 1344              		.loc 1 329 33 is_stmt 1 discriminator 1 view .LVU406
+ 1345 004c 0096     		str	r6, [sp]
+ 1346 004e A642     		cmp	r6, r4
+ 1347 0050 0DD9     		bls	.L98
+ 1348              	.LBB24:
+ 331:services/crypto/jitter_rng.c ****         if (r != JITTER_OK)
+ 1349              		.loc 1 331 9 view .LVU407
+ 331:services/crypto/jitter_rng.c ****         if (r != JITTER_OK)
+ 1350              		.loc 1 331 21 is_stmt 0 view .LVU408
+ 1351 0052 02A8     		add	r0, sp, #8
+ 1352 0054 FFF7FEFF 		bl	make_block
+ 1353              	.LVL116:
+ 1354 0058 031E     		subs	r3, r0, #0
+ 1355 005a 0190     		str	r0, [sp, #4]
+ 1356              	.LVL117:
+ 332:services/crypto/jitter_rng.c ****         {
+ 1357              		.loc 1 332 9 is_stmt 1 view .LVU409
+ 332:services/crypto/jitter_rng.c ****         {
+ 1358              		.loc 1 332 12 is_stmt 0 view .LVU410
+ 1359 005c EFD0     		beq	.L90
+ 334:services/crypto/jitter_rng.c ****             wipe(blk, 16);                           /* may still hold the previous block */
+ 1360              		.loc 1 334 13 is_stmt 1 view .LVU411
+ 334:services/crypto/jitter_rng.c ****             wipe(blk, 16);                           /* may still hold the previous block */
+ 1361              		.loc 1 334 22 is_stmt 0 view .LVU412
+ 1362 005e 0A4B     		ldr	r3, .L99+4
+ 1363 0060 1870     		strb	r0, [r3]
+ 335:services/crypto/jitter_rng.c ****             for (uint16_t i = 0u; i < len; i++)
+ 1364              		.loc 1 335 13 is_stmt 1 view .LVU413
+ 1365 0062 1021     		movs	r1, #16
+ 1366 0064 02A8     		add	r0, sp, #8
+ 1367 0066 FFF7FEFF 		bl	wipe
+ 1368              	.LVL118:
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 35
+
+
+ 336:services/crypto/jitter_rng.c ****                 buf[i] = 0u;
+ 1369              		.loc 1 336 13 view .LVU414
+ 1370              	.LBB23:
+ 336:services/crypto/jitter_rng.c ****                 buf[i] = 0u;
+ 1371              		.loc 1 336 18 view .LVU415
+ 336:services/crypto/jitter_rng.c ****                 buf[i] = 0u;
+ 1372              		.loc 1 336 27 is_stmt 0 view .LVU416
+ 1373 006a 0023     		movs	r3, #0
+ 336:services/crypto/jitter_rng.c ****                 buf[i] = 0u;
+ 1374              		.loc 1 336 13 view .LVU417
+ 1375 006c DDE7     		b	.L91
+ 1376              	.LVL119:
+ 1377              	.L98:
+ 336:services/crypto/jitter_rng.c ****                 buf[i] = 0u;
+ 1378              		.loc 1 336 13 view .LVU418
+ 1379              	.LBE23:
+ 1380              	.LBE24:
+ 1381              	.LBE19:
+ 342:services/crypto/jitter_rng.c ****     }
+ 343:services/crypto/jitter_rng.c **** 
+ 344:services/crypto/jitter_rng.c ****     wipe(blk, 16);
+ 1382              		.loc 1 344 5 is_stmt 1 view .LVU419
+ 1383 006e 1021     		movs	r1, #16
+ 1384 0070 02A8     		add	r0, sp, #8
+ 1385 0072 FFF7FEFF 		bl	wipe
+ 1386              	.LVL120:
+ 345:services/crypto/jitter_rng.c ****     return JITTER_OK;
+ 1387              		.loc 1 345 5 view .LVU420
+ 1388              		.loc 1 345 12 is_stmt 0 view .LVU421
+ 1389 0076 02E0     		b	.L88
+ 1390              	.LVL121:
+ 1391              	.L96:
+ 325:services/crypto/jitter_rng.c ****     if (s_failed != 0u)
+ 1392              		.loc 1 325 16 view .LVU422
+ 1393 0078 0125     		movs	r5, #1
+ 1394 007a 00E0     		b	.L88
+ 1395              	.L97:
+ 1396 007c 0125     		movs	r5, #1
+ 1397              	.LVL122:
+ 1398              	.L88:
+ 346:services/crypto/jitter_rng.c **** }
+ 1399              		.loc 1 346 1 view .LVU423
+ 1400 007e 2800     		movs	r0, r5
+ 1401 0080 07B0     		add	sp, sp, #28
+ 1402              		@ sp needed
+ 1403              	.LVL123:
+ 1404              	.LVL124:
+ 1405              		.loc 1 346 1 view .LVU424
+ 1406 0082 F0BD     		pop	{r4, r5, r6, r7, pc}
+ 1407              	.L100:
+ 1408              		.align	2
+ 1409              	.L99:
+ 1410 0084 00000000 		.word	s_ready
+ 1411 0088 00000000 		.word	s_failed
+ 1412              		.cfi_endproc
+ 1413              	.LFE47:
+ 1415              		.section	.text.jitter_rng_raw,"ax",%progbits
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 36
+
+
+ 1416              		.align	1
+ 1417              		.global	jitter_rng_raw
+ 1418              		.syntax unified
+ 1419              		.code	16
+ 1420              		.thumb_func
+ 1422              	jitter_rng_raw:
+ 1423              	.LVL125:
+ 1424              	.LFB48:
+ 347:services/crypto/jitter_rng.c **** 
+ 348:services/crypto/jitter_rng.c **** /* ---- public: raw samples for offline entropy assessment ------------------ */
+ 349:services/crypto/jitter_rng.c **** uint8_t jitter_rng_raw(uint8_t *out, uint16_t n)
+ 350:services/crypto/jitter_rng.c **** {
+ 1425              		.loc 1 350 1 is_stmt 1 view -0
+ 1426              		.cfi_startproc
+ 1427              		@ args = 0, pretend = 0, frame = 8
+ 1428              		@ frame_needed = 0, uses_anonymous_args = 0
+ 1429              		.loc 1 350 1 is_stmt 0 view .LVU426
+ 1430 0000 70B5     		push	{r4, r5, r6, lr}
+ 1431              	.LCFI8:
+ 1432              		.cfi_def_cfa_offset 16
+ 1433              		.cfi_offset 4, -16
+ 1434              		.cfi_offset 5, -12
+ 1435              		.cfi_offset 6, -8
+ 1436              		.cfi_offset 14, -4
+ 1437 0002 82B0     		sub	sp, sp, #8
+ 1438              	.LCFI9:
+ 1439              		.cfi_def_cfa_offset 24
+ 1440 0004 0500     		movs	r5, r0
+ 1441 0006 0E00     		movs	r6, r1
+ 351:services/crypto/jitter_rng.c ****     uint16_t d;
+ 1442              		.loc 1 351 5 is_stmt 1 view .LVU427
+ 352:services/crypto/jitter_rng.c **** 
+ 353:services/crypto/jitter_rng.c ****     if (out == 0 || s_ready == 0u)
+ 1443              		.loc 1 353 5 view .LVU428
+ 1444              		.loc 1 353 8 is_stmt 0 view .LVU429
+ 1445 0008 0028     		cmp	r0, #0
+ 1446 000a 19D0     		beq	.L105
+ 1447              		.loc 1 353 29 discriminator 1 view .LVU430
+ 1448 000c 0F4B     		ldr	r3, .L109
+ 1449 000e 1B78     		ldrb	r3, [r3]
+ 1450              		.loc 1 353 18 discriminator 1 view .LVU431
+ 1451 0010 002B     		cmp	r3, #0
+ 1452 0012 17D0     		beq	.L106
+ 354:services/crypto/jitter_rng.c ****         return JITTER_ERR_INIT;
+ 355:services/crypto/jitter_rng.c **** 
+ 356:services/crypto/jitter_rng.c ****     s_have_prev = 0u;                                /* start from a clean reference */
+ 1453              		.loc 1 356 5 is_stmt 1 view .LVU432
+ 1454              		.loc 1 356 17 is_stmt 0 view .LVU433
+ 1455 0014 0E4B     		ldr	r3, .L109+4
+ 1456 0016 0022     		movs	r2, #0
+ 1457 0018 1A70     		strb	r2, [r3]
+ 357:services/crypto/jitter_rng.c ****     for (uint16_t i = 0u; i < n; i++)
+ 1458              		.loc 1 357 5 is_stmt 1 view .LVU434
+ 1459              	.LBB25:
+ 1460              		.loc 1 357 10 view .LVU435
+ 1461              	.LVL126:
+ 1462              		.loc 1 357 19 is_stmt 0 view .LVU436
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 37
+
+
+ 1463 001a 0024     		movs	r4, #0
+ 1464              		.loc 1 357 5 view .LVU437
+ 1465 001c 05E0     		b	.L103
+ 1466              	.LVL127:
+ 1467              	.L108:
+ 1468              	.LBB26:
+ 358:services/crypto/jitter_rng.c ****     {
+ 359:services/crypto/jitter_rng.c ****         uint8_t r = next_delta(&d);
+ 360:services/crypto/jitter_rng.c ****         if (r != JITTER_OK)
+ 361:services/crypto/jitter_rng.c ****             return r;
+ 362:services/crypto/jitter_rng.c ****         out[i] = (uint8_t)(d & 0xFFu);
+ 1469              		.loc 1 362 9 is_stmt 1 view .LVU438
+ 1470              		.loc 1 362 18 is_stmt 0 view .LVU439
+ 1471 001e 6B46     		mov	r3, sp
+ 1472 0020 0633     		adds	r3, r3, #6
+ 1473 0022 1B78     		ldrb	r3, [r3]
+ 1474              		.loc 1 362 16 view .LVU440
+ 1475 0024 2B55     		strb	r3, [r5, r4]
+ 1476              	.LBE26:
+ 357:services/crypto/jitter_rng.c ****     for (uint16_t i = 0u; i < n; i++)
+ 1477              		.loc 1 357 35 is_stmt 1 discriminator 2 view .LVU441
+ 1478 0026 0134     		adds	r4, r4, #1
+ 1479              	.LVL128:
+ 357:services/crypto/jitter_rng.c ****     for (uint16_t i = 0u; i < n; i++)
+ 1480              		.loc 1 357 35 is_stmt 0 discriminator 2 view .LVU442
+ 1481 0028 A4B2     		uxth	r4, r4
+ 1482              	.LVL129:
+ 1483              	.L103:
+ 357:services/crypto/jitter_rng.c ****     for (uint16_t i = 0u; i < n; i++)
+ 1484              		.loc 1 357 29 is_stmt 1 discriminator 1 view .LVU443
+ 1485 002a B442     		cmp	r4, r6
+ 1486 002c 06D2     		bcs	.L107
+ 1487              	.LBB27:
+ 359:services/crypto/jitter_rng.c ****         if (r != JITTER_OK)
+ 1488              		.loc 1 359 9 view .LVU444
+ 359:services/crypto/jitter_rng.c ****         if (r != JITTER_OK)
+ 1489              		.loc 1 359 21 is_stmt 0 view .LVU445
+ 1490 002e 6B46     		mov	r3, sp
+ 1491 0030 981D     		adds	r0, r3, #6
+ 1492 0032 FFF7FEFF 		bl	next_delta
+ 1493              	.LVL130:
+ 360:services/crypto/jitter_rng.c ****             return r;
+ 1494              		.loc 1 360 9 is_stmt 1 view .LVU446
+ 360:services/crypto/jitter_rng.c ****             return r;
+ 1495              		.loc 1 360 12 is_stmt 0 view .LVU447
+ 1496 0036 0028     		cmp	r0, #0
+ 1497 0038 F1D0     		beq	.L108
+ 1498 003a 04E0     		b	.L102
+ 1499              	.LVL131:
+ 1500              	.L107:
+ 360:services/crypto/jitter_rng.c ****             return r;
+ 1501              		.loc 1 360 12 view .LVU448
+ 1502              	.LBE27:
+ 1503              	.LBE25:
+ 363:services/crypto/jitter_rng.c ****     }
+ 364:services/crypto/jitter_rng.c ****     return JITTER_OK;
+ 1504              		.loc 1 364 12 view .LVU449
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 38
+
+
+ 1505 003c 0020     		movs	r0, #0
+ 1506              	.LBB28:
+ 1507 003e 02E0     		b	.L102
+ 1508              	.LVL132:
+ 1509              	.L105:
+ 1510              		.loc 1 364 12 view .LVU450
+ 1511              	.LBE28:
+ 354:services/crypto/jitter_rng.c **** 
+ 1512              		.loc 1 354 16 view .LVU451
+ 1513 0040 0120     		movs	r0, #1
+ 1514              	.LVL133:
+ 354:services/crypto/jitter_rng.c **** 
+ 1515              		.loc 1 354 16 view .LVU452
+ 1516 0042 00E0     		b	.L102
+ 1517              	.LVL134:
+ 1518              	.L106:
+ 354:services/crypto/jitter_rng.c **** 
+ 1519              		.loc 1 354 16 view .LVU453
+ 1520 0044 0120     		movs	r0, #1
+ 1521              	.LVL135:
+ 1522              	.L102:
+ 365:services/crypto/jitter_rng.c **** }
+ 1523              		.loc 1 365 1 view .LVU454
+ 1524 0046 02B0     		add	sp, sp, #8
+ 1525              		@ sp needed
+ 1526              	.LVL136:
+ 1527              	.LVL137:
+ 1528              		.loc 1 365 1 view .LVU455
+ 1529 0048 70BD     		pop	{r4, r5, r6, pc}
+ 1530              	.L110:
+ 1531 004a C046     		.align	2
+ 1532              	.L109:
+ 1533 004c 00000000 		.word	s_ready
+ 1534 0050 00000000 		.word	s_have_prev
+ 1535              		.cfi_endproc
+ 1536              	.LFE48:
+ 1538              		.section	.bss.s_apt_pos,"aw",%nobits
+ 1539              		.align	1
+ 1542              	s_apt_pos:
+ 1543 0000 0000     		.space	2
+ 1544              		.section	.bss.s_apt_cnt,"aw",%nobits
+ 1545              		.align	1
+ 1548              	s_apt_cnt:
+ 1549 0000 0000     		.space	2
+ 1550              		.section	.bss.s_apt_ref,"aw",%nobits
+ 1553              	s_apt_ref:
+ 1554 0000 00       		.space	1
+ 1555              		.section	.bss.s_rct_cnt,"aw",%nobits
+ 1558              	s_rct_cnt:
+ 1559 0000 00       		.space	1
+ 1560              		.section	.bss.s_rct_last,"aw",%nobits
+ 1563              	s_rct_last:
+ 1564 0000 00       		.space	1
+ 1565              		.section	.bss.s_failed,"aw",%nobits
+ 1568              	s_failed:
+ 1569 0000 00       		.space	1
+ 1570              		.section	.bss.s_ready,"aw",%nobits
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 39
+
+
+ 1573              	s_ready:
+ 1574 0000 00       		.space	1
+ 1575              		.section	.bss.s_have_prev,"aw",%nobits
+ 1578              	s_have_prev:
+ 1579 0000 00       		.space	1
+ 1580              		.section	.bss.s_prev,"aw",%nobits
+ 1581              		.align	1
+ 1584              	s_prev:
+ 1585 0000 0000     		.space	2
+ 1586              		.section	.rodata.k_cond_key,"a"
+ 1587              		.align	2
+ 1590              	k_cond_key:
+ 1591 0000 00000000 		.space	16
+ 1591      00000000 
+ 1591      00000000 
+ 1591      00000000 
+ 1592              		.text
+ 1593              	.Letext0:
+ 1594              		.file 2 "/Applications/ArmGNUToolchain/15.3.rel1/arm-none-eabi/arm-none-eabi/include/machine/_defa
+ 1595              		.file 3 "/Applications/ArmGNUToolchain/15.3.rel1/arm-none-eabi/arm-none-eabi/include/sys/_stdint.h
+ 1596              		.file 4 "Drivers/CMSIS/Device/ST/STM32F0xx/Include/stm32f042x6.h"
+ 1597              		.file 5 "services/crypto/../../Core/Inc/aes.h"
+ 1598              		.file 6 "Drivers/CMSIS/Device/ST/STM32F0xx/Include/system_stm32f0xx.h"
+ 1599              		.file 7 "<built-in>"
+ARM GAS  /var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s 			page 40
+
+
+DEFINED SYMBOLS
+                            *ABS*:00000000 jitter_rng.c
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:19     .text.health_reset:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:24     .text.health_reset:00000000 health_reset
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:60     .text.health_reset:0000001c $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1563   .bss.s_rct_last:00000000 s_rct_last
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1558   .bss.s_rct_cnt:00000000 s_rct_cnt
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1542   .bss.s_apt_pos:00000000 s_apt_pos
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1548   .bss.s_apt_cnt:00000000 s_apt_cnt
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1553   .bss.s_apt_ref:00000000 s_apt_ref
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:69     .text.wipe:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:74     .text.wipe:00000000 wipe
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:112    .text.next_delta:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:117    .text.next_delta:00000000 next_delta
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:236    .text.next_delta:00000054 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1578   .bss.s_have_prev:00000000 s_have_prev
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1584   .bss.s_prev:00000000 s_prev
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:245    .text.health_feed:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:250    .text.health_feed:00000000 health_feed
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:384    .text.health_feed:00000080 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:393    .text.clock_48mhz_init:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:398    .text.clock_48mhz_init:00000000 clock_48mhz_init
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:570    .text.clock_48mhz_init:00000098 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:578    .text.make_block:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:583    .text.make_block:00000000 make_block
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:869    .text.make_block:000000f4 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1590   .rodata.k_cond_key:00000000 k_cond_key
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:874    .text.jitter_rng_init:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:880    .text.jitter_rng_init:00000000 jitter_rng_init
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1221   .text.jitter_rng_init:0000013c $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1573   .bss.s_ready:00000000 s_ready
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1568   .bss.s_failed:00000000 s_failed
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1236   .text.jitter_rng_fill:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1242   .text.jitter_rng_fill:00000000 jitter_rng_fill
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1410   .text.jitter_rng_fill:00000084 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1416   .text.jitter_rng_raw:00000000 $t
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1422   .text.jitter_rng_raw:00000000 jitter_rng_raw
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1533   .text.jitter_rng_raw:0000004c $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1539   .bss.s_apt_pos:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1545   .bss.s_apt_cnt:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1554   .bss.s_apt_ref:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1559   .bss.s_rct_cnt:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1564   .bss.s_rct_last:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1569   .bss.s_failed:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1574   .bss.s_ready:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1579   .bss.s_have_prev:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1581   .bss.s_prev:00000000 $d
+/var/folders/z2/mjhqlg9j11s2j1dlk0c67xh40000gn/T//ccnO7ZWe.s:1587   .rodata.k_cond_key:00000000 $d
+
+UNDEFINED SYMBOLS
+SystemCoreClockUpdate
+memset
+aes128_encrypt_block
